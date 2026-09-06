@@ -39,6 +39,11 @@ public enum MobileBuildLogRecovery {
         guard let directory = candidates.sorted(by: {
             $0.1 == $1.1 ? $0.0.lastPathComponent > $1.0.lastPathComponent : $0.1 > $1.1
         }).first?.0 else { return nil }
+        return try recover(in: directory)
+    }
+
+    public static func recover(in directory: URL) throws -> MobileRecoveredBuildLog {
+        let fm = FileManager.default
         let logURL = directory.appendingPathComponent("build.log")
         let state = (try? Data(contentsOf: directory.appendingPathComponent("build-state.json")))
             .flatMap { try? JSONDecoder().decode(State.self, from: $0) }

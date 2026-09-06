@@ -44,7 +44,16 @@ public enum MobileProjectBuilder {
         // Each attempt owns its outputs. A failed job cannot reuse yesterday's object or IPA.
         let work = outputDirectory.appendingPathComponent("\(manifest.name)-\(UUID().uuidString)", isDirectory: true)
         let modules = work.appendingPathComponent("Modules", isDirectory: true)
-        let cache = work.appendingPathComponent("ModuleCache", isDirectory: true)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let manifestIdentity = String(decoding: try encoder.encode(manifest), as: UTF8.self)
+        let engineAttributes = try? fm.attributesOfItem(atPath: engine.location.path)
+        let sdkAttributes = try? fm.attributesOfItem(atPath: sdk.sdkURL.path)
+        let cacheIdentity = ["module-cache-v1", project.root.path, toolchain.root.path,
+            sdk.sdkURL.path, PreparedToolchain.expectedBundledRuntimeRevision,
+            engine.location.path, String(describing: engineAttributes?[.modificationDate]),
+            String(describing: engineAttributes?[.size]), String(describing: sdkAttributes?[.modificationDate]), manifestIdentity].joined(separator: "\n")
+        let cache = try MobileModuleCache.directory(in: outputDirectory, identity: cacheIdentity)
         // Product and target names commonly match. Keep their filesystem
         // namespaces separate so LLD never receives a target directory as -o.
         let targetRoot = work.appendingPathComponent("Targets", isDirectory: true)
@@ -87,6 +96,8 @@ public enum MobileProjectBuilder {
 
         report("Building \(manifest.name) for arm64 iOS \(manifest.deploymentTarget)")
         report("Build log: \(logURL.path)")
+        report("Reusable module cache: \(cache.path)")
+        report("Build progress: 0/\(targets.count + 2)")
         do {
             try stage("Preparing build")
             // Direct LLD invocation bypasses the Clang driver's automatic
@@ -100,7 +111,7 @@ public enum MobileProjectBuilder {
                 if let map = target.moduleMap { moduleMaps.append(try input(map)) }
             }
             let targetTriple = "arm64-apple-ios\(manifest.deploymentTarget)"
-            for target in targets {
+            for (targetIndex, target) in targets.enumerated() {
                 try checkCancellation()
                 try stage("Compiling \(target.name)")
                 let targetWork = targetRoot.appendingPathComponent(target.name, isDirectory: true)
@@ -170,6 +181,7 @@ public enum MobileProjectBuilder {
                     guard fm.fileExists(atPath: module.path) else { throw MobileProjectBuildError.invalid("Missing Swift module: \(target.name)") }
                     objects.append(object)
                 }
+                report("Build progress: \(targetIndex + 1)/\(targets.count + 2)")
             }
             try checkCancellation()
             let executable = products.appendingPathComponent(manifest.name)
@@ -207,6 +219,7 @@ public enum MobileProjectBuilder {
             report("Linker arguments:\n" + link.map { "  " + $0 }.joined(separator: "\n"))
             try checked(engine.runMachOLLD(arguments: link,
                 diagnosticsURL: work.appendingPathComponent("link.stderr")), job: "Link", output: executable)
+            report("Build progress: \(targets.count + 1)/\(targets.count + 2)")
             let binary = try FileHandle(forReadingFrom: executable)
             let header = try binary.read(upToCount: 16) ?? Data()
             try binary.close()
@@ -255,6 +268,7 @@ public enum MobileProjectBuilder {
                     minimumOSVersion: manifest.deploymentTarget), additionalFiles: files,
                 additionalInfoPlist: extraPlist, outputURL: ipa)
             report("SUCCESS: \(ipa.lastPathComponent)")
+            report("Build progress: \(targets.count + 2)/\(targets.count + 2)")
             try MobileBuildLogRecovery.checkpoint(in: work, stage: currentStage, status: .succeeded)
             return MobileProjectBuildOutput(ipaURL: ipa, logURL: logURL)
         } catch {

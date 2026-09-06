@@ -1,9 +1,19 @@
 import SwiftUI
 import UIKit
+import XToolMobileCore
+
+struct IDEEditorCommand {
+    var id = UUID()
+    enum Action { case jump(Int, Int), find(String), replace(String, String, Bool) }
+    let action: Action
+}
 
 struct IDECodeEditor: UIViewRepresentable {
     @Binding var text: String
     let language: IDELanguage
+    var command: IDEEditorCommand? = nil
+    var symbols: [String] = []
+    var diagnostics: [MobileSourceDiagnostic] = []
 
     func makeCoordinator() -> Coordinator {
         Coordinator(parent: self)
@@ -19,6 +29,7 @@ struct IDECodeEditor: UIViewRepresentable {
         view.textView.smartQuotesType = .no
         view.textView.smartDashesType = .no
         view.textView.smartInsertDeleteType = .no
+        view.textView.isFindInteractionEnabled = true
         view.textView.alwaysBounceVertical = true
         view.textView.alwaysBounceHorizontal = true
         view.textView.showsHorizontalScrollIndicator = true
@@ -37,6 +48,7 @@ struct IDECodeEditor: UIViewRepresentable {
         context.coordinator.container = view
         context.coordinator.applyHighlighting(to: view.textView, preservingSelection: false)
         context.coordinator.updateLineNumbers()
+        context.coordinator.updateCompletions()
         return view
     }
 
@@ -47,12 +59,24 @@ struct IDECodeEditor: UIViewRepresentable {
             context.coordinator.applyHighlighting(to: uiView.textView, preservingSelection: false)
         }
         context.coordinator.updateLineNumbers()
+        if context.coordinator.lastDiagnostics != diagnostics {
+            context.coordinator.lastDiagnostics = diagnostics
+            context.coordinator.applyHighlighting(to: uiView.textView, preservingSelection: true)
+        }
+        if let command, context.coordinator.lastCommand != command.id {
+            context.coordinator.lastCommand = command.id
+            DispatchQueue.main.async { context.coordinator.execute(command.action) }
+        }
     }
 
     final class Coordinator: NSObject, UITextViewDelegate {
         var parent: IDECodeEditor
         weak var container: EditorContainerView?
         private var isApplyingHighlighting = false
+        var lastCommand: UUID?
+        var lastDiagnostics: [MobileSourceDiagnostic] = []
+        private let suggestions = UIToolbar()
+        private var completionRange = NSRange(location: 0, length: 0)
 
         init(parent: IDECodeEditor) {
             self.parent = parent
@@ -63,10 +87,69 @@ struct IDECodeEditor: UIViewRepresentable {
             parent.text = textView.text
             applyHighlighting(to: textView, preservingSelection: true)
             updateLineNumbers()
+            updateCompletions()
         }
 
         func textViewDidChangeSelection(_ textView: UITextView) {
             container?.setNeedsLayout()
+            if !isApplyingHighlighting { updateCompletions() }
+        }
+
+        func execute(_ action: IDEEditorCommand.Action) {
+            guard let view = container?.textView else { return }
+            let text = (view.text ?? "") as NSString
+            switch action {
+            case .jump(let line, let column):
+                let rows = (view.text ?? "").components(separatedBy: "\n")
+                let row = max(0, min(line - 1, rows.count - 1))
+                let offset = rows.prefix(row).reduce(0) { $0 + ($1 as NSString).length + 1 }
+                view.selectedRange = NSRange(location: min(text.length, offset + max(0, min(column - 1, (rows[row] as NSString).length))), length: 0)
+            case .find(let query):
+                guard !query.isEmpty else { return }
+                let start = min(text.length, NSMaxRange(view.selectedRange))
+                var range = text.range(of: query, options: .caseInsensitive, range: NSRange(location: start, length: text.length - start))
+                if range.location == NSNotFound { range = text.range(of: query, options: .caseInsensitive) }
+                guard range.location != NSNotFound else { return }
+                view.selectedRange = range
+            case .replace(let query, let replacement, let all):
+                guard !query.isEmpty else { return }
+                if all {
+                    let updated = text.replacingOccurrences(of: query, with: replacement, options: .caseInsensitive, range: NSRange(location: 0, length: text.length))
+                    view.selectedRange = NSRange(location: 0, length: text.length)
+                    view.insertText(updated)
+                } else {
+                    let selected = view.selectedRange
+                    if selected.length > 0, text.substring(with: selected).caseInsensitiveCompare(query) == .orderedSame { view.insertText(replacement) }
+                    execute(.find(query))
+                }
+            }
+            view.becomeFirstResponder()
+            view.scrollRangeToVisible(view.selectedRange)
+        }
+
+        func updateCompletions() {
+            guard let view = container?.textView else { return }
+            let text = (view.text ?? "") as NSString
+            let caret = min(view.selectedRange.location, text.length)
+            let prefixText = text.substring(with: NSRange(location: max(0, caret - 100), length: min(100, caret)))
+            let regex = try? NSRegularExpression(pattern: #"[A-Za-z_][A-Za-z0-9_]*$"#)
+            let range = regex?.firstMatch(in: prefixText, range: NSRange(location: 0, length: (prefixText as NSString).length))?.range
+            let prefix = range.map { (prefixText as NSString).substring(with: $0) } ?? ""
+            completionRange = NSRange(location: caret - (prefix as NSString).length, length: (prefix as NSString).length)
+            let keywords = ["func", "struct", "class", "protocol", "extension", "import", "return", "guard", "private", "public", "static", "async", "await", "throws", "String", "Int", "Bool", "View", "Text", "VStack", "HStack", "Button", "ForEach"]
+            let names = Set(parent.symbols + keywords)
+            let candidates = prefix.count >= 2 ? Array(names.filter { $0 != prefix && $0.lowercased().hasPrefix(prefix.lowercased()) }.sorted().prefix(4)) : []
+            var items = [UIBarButtonItem(title: "⇥", style: .plain, target: self, action: #selector(indent))]
+            items += candidates.map { UIBarButtonItem(title: $0, style: .plain, target: self, action: #selector(complete(_:))) }
+            suggestions.items = items
+            suggestions.sizeToFit()
+            if view.inputAccessoryView !== suggestions { view.inputAccessoryView = suggestions; view.reloadInputViews() }
+        }
+        @objc private func indent() { container?.textView.insertText("    ") }
+        @objc private func complete(_ sender: UIBarButtonItem) {
+            guard let view = container?.textView, let title = sender.title, NSMaxRange(completionRange) <= (view.text as NSString).length else { return }
+            view.selectedRange = completionRange
+            view.insertText(title)
         }
 
         func scrollViewDidScroll(_ scrollView: UIScrollView) {
@@ -83,11 +166,21 @@ struct IDECodeEditor: UIViewRepresentable {
             defer { isApplyingHighlighting = false }
 
             let selection = textView.selectedRange
-            let attributed = IDESyntaxHighlighter.highlight(
+            let attributed = NSMutableAttributedString(attributedString: IDESyntaxHighlighter.highlight(
                 textView.text ?? "",
                 language: parent.language,
                 baseFont: textView.font ?? UIFont.monospacedSystemFont(ofSize: 14, weight: .regular)
-            )
+            ))
+            let rows = (textView.text ?? "").components(separatedBy: "\n")
+            for diagnostic in parent.diagnostics where diagnostic.line > 0 && diagnostic.line <= rows.count {
+                let row = diagnostic.line - 1
+                let offset = rows.prefix(row).reduce(0) { $0 + ($1 as NSString).length + 1 }
+                let length = (rows[row] as NSString).length
+                if length > 0 {
+                    attributed.addAttributes([.underlineStyle: NSUnderlineStyle.single.rawValue,
+                        .underlineColor: diagnostic.severity == "error" ? UIColor.systemRed : UIColor.systemOrange], range: NSRange(location: offset, length: length))
+                }
+            }
             textView.attributedText = attributed
             if preservingSelection {
                 let maxLocation = attributed.length
@@ -197,6 +290,14 @@ private enum IDESyntaxHighlighter {
             apply(pattern: "^\\s*#\\s*[A-Za-z_]+", options: [.anchorsMatchLines], color: .systemPink, to: result, range: fullRange)
         }
 
+        // Apply comments and strings last as complete tokens so keyword/type
+        // coloring cannot overwrite text inside them.
+        if let tokens = try? NSRegularExpression(pattern: #""(?:\\.|[^"\\])*"|//[^\n]*|/\*[\s\S]*?\*/"#) {
+            for match in tokens.matches(in: source, range: fullRange) {
+                let value = (source as NSString).substring(with: match.range)
+                result.addAttribute(.foregroundColor, value: value.hasPrefix("\"") ? UIColor.systemRed : UIColor.systemGreen, range: match.range)
+            }
+        }
         return result
     }
 

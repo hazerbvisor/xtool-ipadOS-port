@@ -37,6 +37,26 @@ private struct MobileIDEView: View {
     @State private var previousBuildLog: MobileRecoveredBuildLog?
     @State private var showingPreviousBuildLog = false
     @State private var attemptedBuildLogRecovery = false
+    @State private var showingTools = false
+    @State private var showingGitHub = false
+    @State private var showingAssistant = false
+    @State private var toolsPath = ""
+    @State private var toolsTab = "Files"
+    @State private var findVisible = false
+    @State private var findText = ""
+    @State private var replacement = ""
+    @State private var editorCommand: IDEEditorCommand?
+    @State private var splitEditor = false
+    @State private var secondDocumentID: URL?
+    @State private var navigatorWidth: CGFloat = 245
+    @State private var inspectorWidth: CGFloat = 270
+    @State private var consoleHeight: CGFloat = 215
+    @State private var diagnostics: [MobileSourceDiagnostic] = []
+    @State private var completionSymbols: [String] = []
+    @State private var buildPhase = ""
+    @State private var completedSteps = 0
+    @State private var totalSteps = 1
+    @State private var lastAIEdit: MobileWorkspaceTools.AppliedEdits?
 
     @State private var navigatorVisible = true
     @State private var inspectorVisible = true
@@ -56,26 +76,29 @@ private struct MobileIDEView: View {
             HStack(spacing: 0) {
                 if navigatorVisible {
                     navigatorPanel
-                        .frame(width: 245)
-                    Divider()
+                        .frame(width: navigatorWidth)
+                    IDEResizeHandle(size: $navigatorWidth, maximum: 330)
                 }
 
                 VStack(spacing: 0) {
                     editorTabs
                     Divider()
-                    editorSurface
+                    HStack(spacing: 1) {
+                        editorSurface
+                        if splitEditor { Divider(); secondaryEditor }
+                    }
 
                     if consoleVisible {
-                        Divider()
+                        IDEResizeHandle(size: $consoleHeight, vertical: false, reversed: true, minimum: 100, maximum: 500)
                         consolePanel
-                            .frame(height: 215)
+                            .frame(height: consoleHeight)
                     }
                 }
 
                 if inspectorVisible {
-                    Divider()
+                    IDEResizeHandle(size: $inspectorWidth, reversed: true, maximum: 330)
                     inspectorPanel
-                        .frame(width: 270)
+                        .frame(width: inspectorWidth)
                 }
             }
 
@@ -105,6 +128,9 @@ private struct MobileIDEView: View {
         ) { result in
             importToolchain(result)
         }
+        .sheet(isPresented: $showingTools) { workspaceToolsSheet }
+        .sheet(isPresented: $showingGitHub) { githubSheet }
+        .sheet(isPresented: $showingAssistant) { assistantSheet }
         .sheet(isPresented: $showingPreviousBuildLog) {
             NavigationStack {
                 VStack(alignment: .leading, spacing: 12) {
@@ -204,6 +230,18 @@ private struct MobileIDEView: View {
             .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 7))
 
             Spacer()
+
+            Menu {
+                Button("Workspace tools") { toolsTab = "Files"; showingTools = true }
+                Button("Find in file") { findVisible.toggle() }.keyboardShortcut("f", modifiers: .command)
+                Button("Search project") { toolsTab = "Search"; showingTools = true }.keyboardShortcut("f", modifiers: [.command, .shift])
+                Button("Toggle split editor") { splitEditor.toggle(); secondDocumentID = documents.first(where: { $0.id != activeDocumentID })?.id ?? activeDocumentID }.keyboardShortcut("\\", modifiers: .command)
+                Button("Save all") { do { try saveAllDocuments() } catch { appendLog("Save failed: \(error)") } }.keyboardShortcut("s", modifiers: [.command, .shift])
+                Button("Close current file") { if let activeDocumentID { closeDocument(activeDocumentID) } }.keyboardShortcut("w", modifiers: .command)
+                Button("GitHub") { showingGitHub = true }
+                Button("Assistant") { showingAssistant = true }.keyboardShortcut("j", modifiers: [.command, .shift])
+            } label: { Image(systemName: "slider.horizontal.3").frame(width: 30, height: 30) }
+            .disabled(isBuilding)
 
             buildStatusPill
 
@@ -329,7 +367,9 @@ private struct MobileIDEView: View {
                                 .background(activeDocumentID == entry.url ? Color.accentColor.opacity(0.20) : .clear)
                             }
                             .buttonStyle(.plain)
-                            .disabled(entry.isDirectory)
+                            .contextMenu {
+                                Button("File actions…") { toolsPath = entry.relativePath; toolsTab = "Files"; showingTools = true }
+                            }
                         }
                     }
                 }
@@ -413,8 +453,17 @@ private struct MobileIDEView: View {
 
                 IDECodeEditor(
                     text: activeTextBinding,
-                    language: document.language
+                    language: document.language,
+                    command: editorCommand,
+                    symbols: completionSymbols,
+                    diagnostics: diagnosticsFor(document.url)
                 )
+                if findVisible { findBar }
+                ForEach(diagnosticsFor(document.url).prefix(4)) { diagnostic in
+                    Button { editorCommand = IDEEditorCommand(action: .jump(diagnostic.line, diagnostic.column)) } label: {
+                        Text("Line \(diagnostic.line): \(diagnostic.message)").font(.caption).foregroundStyle(diagnostic.severity == "error" ? .red : .orange).lineLimit(2)
+                    }
+                }
             }
         } else {
             VStack(spacing: 12) {
@@ -634,8 +683,9 @@ private struct MobileIDEView: View {
                 if isBuilding {
                     ProgressView()
                         .controlSize(.small)
-                    Text("Building")
+                    Text(buildPhase.isEmpty ? "Building" : buildPhase)
                         .font(.caption)
+                        .lineLimit(1)
                         .foregroundStyle(.secondary)
                 }
 
@@ -651,7 +701,17 @@ private struct MobileIDEView: View {
             .frame(height: 34)
             .background(Color(uiColor: .tertiarySystemBackground))
 
-            ScrollView {
+            if isBuildingProject {
+                ProgressView(value: Double(completedSteps), total: Double(max(1, totalSteps))).padding(.horizontal)
+            }
+            if selectedConsoleTab == .issues {
+                List(diagnostics) { diagnostic in
+                    Button { openDiagnostic(diagnostic) } label: {
+                        Text("\(URL(fileURLWithPath: diagnostic.path).lastPathComponent):\(diagnostic.line) · \(diagnostic.message)")
+                            .font(.system(size: 12, design: .monospaced)).foregroundStyle(diagnostic.severity == "error" ? .red : .orange)
+                    }
+                }
+            } else { ScrollView {
                 Text(consoleText)
                     .font(.system(size: 11.5, design: .monospaced))
                     .textSelection(.enabled)
@@ -660,6 +720,7 @@ private struct MobileIDEView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(Color(uiColor: .secondarySystemBackground))
+            }
         }
     }
 
@@ -686,6 +747,144 @@ private struct MobileIDEView: View {
     }
 
     // MARK: - Editor state
+
+    private var workspaceToolsSheet: some View {
+        NavigationStack {
+            IDEProjectToolsView(root: project?.root, initialPath: toolsPath, initialTab: toolsTab,
+                prepareMutation: saveAllDocuments, onChanged: refreshFilesAfterMutation,
+                onOpen: { url, line in showingTools = false; openLocation(url, line: line) })
+                .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { showingTools = false } } }
+        }
+    }
+    private var githubSheet: some View {
+        NavigationStack {
+            IDEGitHubView(projectRoot: project?.root, prepareMutation: saveAllDocuments,
+                onOpen: { url in showingGitHub = false; importProject(.success([url])) })
+                .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { showingGitHub = false } } }
+        }
+    }
+    private var assistantSheet: some View {
+        NavigationStack {
+            IDEAssistantView(root: project?.root, files: projectChatFiles,
+                onApply: applyAssistantEdits, onUndo: undoAssistantEdits)
+                .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { showingAssistant = false } } }
+        }
+    }
+    private var projectChatFiles: [String: String] {
+        guard let root = project?.root.resolvingSymlinksInPath() else { return [:] }
+        return Dictionary(documents.compactMap { document -> (String, String)? in
+            let path = document.url.resolvingSymlinksInPath().path
+            guard path.hasPrefix(root.path + "/") else { return nil }
+            return (String(path.dropFirst(root.path.count + 1)), document.text)
+        }, uniquingKeysWith: { _, latest in latest })
+    }
+    private var findBar: some View {
+        HStack {
+            TextField("Find", text: $findText).textInputAutocapitalization(.never).autocorrectionDisabled()
+            TextField("Replace", text: $replacement).textInputAutocapitalization(.never).autocorrectionDisabled()
+            Button("Next") { editorCommand = IDEEditorCommand(action: .find(findText)) }
+            Button("Replace") { editorCommand = IDEEditorCommand(action: .replace(findText, replacement, false)) }
+            Button("All") { editorCommand = IDEEditorCommand(action: .replace(findText, replacement, true)) }
+            Button { findVisible = false } label: { Image(systemName: "xmark") }
+        }.font(.caption).padding(8)
+    }
+    @ViewBuilder private var secondaryEditor: some View {
+        VStack {
+            Picker("Second editor", selection: $secondDocumentID) {
+                Text("Choose a file").tag(nil as URL?)
+                ForEach(documents) { document in Text(document.title).tag(Optional(document.id)) }
+            }
+            if let id = secondDocumentID, let document = documents.first(where: { $0.id == id }) {
+                IDECodeEditor(text: textBinding(for: id), language: document.language,
+                    symbols: completionSymbols, diagnostics: diagnosticsFor(document.url)).id(id)
+            } else { Text("Open a second file to edit side by side.").foregroundStyle(.secondary); Spacer() }
+        }.frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+    private func textBinding(for id: URL) -> Binding<String> {
+        Binding(get: { documents.first(where: { $0.id == id })?.text ?? "" }, set: { text in
+            guard let index = documents.firstIndex(where: { $0.id == id }) else { return }
+            documents[index].text = text; documents[index].isDirty = true
+        })
+    }
+    private func diagnosticsFor(_ url: URL) -> [MobileSourceDiagnostic] {
+        diagnostics.filter { diagnostic in
+            let source = diagnostic.path.hasPrefix("/") ? URL(fileURLWithPath: diagnostic.path) : project?.root.appendingPathComponent(diagnostic.path)
+            return source?.resolvingSymlinksInPath() == url.resolvingSymlinksInPath()
+        }
+    }
+    private func openDiagnostic(_ diagnostic: MobileSourceDiagnostic) {
+        let url = diagnostic.path.hasPrefix("/") ? URL(fileURLWithPath: diagnostic.path) : project?.root.appendingPathComponent(diagnostic.path)
+        if let url { openLocation(url, line: diagnostic.line, column: diagnostic.column) }
+    }
+    private func openLocation(_ url: URL, line: Int, column: Int = 1) {
+        guard let root = project?.root.resolvingSymlinksInPath(), url.resolvingSymlinksInPath().path.hasPrefix(root.path + "/") else {
+            appendLog("This diagnostic refers to a file outside the editable project."); return
+        }
+        if let entry = navigatorEntries.first(where: { $0.url.resolvingSymlinksInPath() == url.resolvingSymlinksInPath() }) {
+            openFile(entry)
+        } else { openGeneratedFile(url) }
+        editorCommand = IDEEditorCommand(action: .jump(line, column))
+    }
+    private func saveAllDocuments() throws {
+        guard !isBuilding else { throw MobileProjectBuildError.invalid("Wait for the current build before modifying project files") }
+        for index in documents.indices where documents[index].isDirty {
+            try documents[index].text.write(to: documents[index].url, atomically: true, encoding: .utf8)
+            documents[index].isDirty = false
+        }
+    }
+    private func refreshFilesAfterMutation() {
+        guard let project else { return }
+        navigatorEntries = IDEWorkspaceScanner.scan(root: project.root, maxDepth: 15)
+        documents = documents.compactMap { document in
+            guard let values = try? document.url.resourceValues(forKeys: [.fileSizeKey]), (values.fileSize ?? 0) <= 2_000_000,
+                  let text = try? String(contentsOf: document.url, encoding: .utf8) else { return nil }
+            return IDEDocument(url: document.url, text: text)
+        }
+        if !documents.contains(where: { $0.id == activeDocumentID }) { activeDocumentID = documents.first?.id }
+        if !documents.contains(where: { $0.id == secondDocumentID }) { secondDocumentID = documents.first?.id }
+        diagnostics = []
+        refreshCompletionSymbols()
+    }
+    private func refreshCompletionSymbols() {
+        guard let root = project?.root else { completionSymbols = []; return }
+        Task {
+            let symbols = await Task.detached { () -> [String] in
+                guard let regex = try? NSRegularExpression(pattern: #"\b[A-Za-z_][A-Za-z0-9_]{2,}\b"#) else { return [] }
+                var names: Set<String> = [], bytes = 0
+                for entry in IDEWorkspaceScanner.scan(root: root, maxDepth: 15) where !entry.isDirectory {
+                    guard let size = try? entry.url.resourceValues(forKeys: [.fileSizeKey]).fileSize,
+                          size <= 200_000, bytes + size <= 1_000_000,
+                          let text = try? String(contentsOf: entry.url, encoding: .utf8) else { continue }
+                    bytes += size
+                    let source = text as NSString
+                    for match in regex.matches(in: text, range: NSRange(location: 0, length: source.length)) {
+                        names.insert(source.substring(with: match.range))
+                        if names.count >= 4000 { return names.sorted() }
+                    }
+                }
+                return names.sorted()
+            }.value
+            if project?.root == root { completionSymbols = symbols }
+        }
+    }
+    private func applyAssistantEdits(_ edits: [MobileWorkspaceTools.Edit], expected: [String: String]) throws {
+        guard let root = project?.root else { throw MobileProjectBuildError.invalid("Open a project before applying edits") }
+        for (path, before) in expected {
+            if let current = projectChatFiles[path], current != before { throw MobileProjectBuildError.invalid("\(path) changed since the message was sent. Send fresh context first.") }
+        }
+        try saveAllDocuments()
+        lastAIEdit = try MobileWorkspaceTools.apply(edits, expected: expected, in: root)
+        refreshFilesAfterMutation()
+        appendLog("Assistant: applied \(edits.count) reviewed file changes.")
+    }
+    private func undoAssistantEdits() throws {
+        guard let root = project?.root, let lastAIEdit else { throw MobileProjectBuildError.invalid("No AI edit to undo") }
+        try saveAllDocuments()
+        try MobileWorkspaceTools.undo(lastAIEdit, in: root)
+        self.lastAIEdit = nil
+        refreshFilesAfterMutation()
+        appendLog("Assistant edit undone.")
+    }
 
     private var activeDocument: IDEDocument? {
         guard let activeDocumentID else { return nil }
@@ -732,16 +931,21 @@ private struct MobileIDEView: View {
             return logLines.joined(separator: "\n")
         case .console:
             return "XTool runtime console\n\n" + logLines.suffix(30).joined(separator: "\n")
+        case .issues:
+            return diagnostics.map(\.message).joined(separator: "\n")
         }
     }
 
     private func openFile(_ entry: IDEFileEntry) {
+        editorCommand = nil
         if documents.contains(where: { $0.id == entry.url }) {
             activeDocumentID = entry.url
             return
         }
 
         do {
+            let values = try entry.url.resourceValues(forKeys: [.fileSizeKey])
+            guard (values.fileSize ?? 0) <= 2_000_000 else { throw MobileProjectBuildError.invalid("Editor files are limited to 2 MB") }
             let text = try String(contentsOf: entry.url, encoding: .utf8)
             documents.append(IDEDocument(url: entry.url, text: text))
             activeDocumentID = entry.url
@@ -752,6 +956,8 @@ private struct MobileIDEView: View {
     }
 
     private func openGeneratedFile(_ url: URL) {
+        editorCommand = nil
+        guard let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize, size <= 2_000_000 else { return }
         if let existingIndex = documents.firstIndex(where: { $0.id == url }) {
             if let text = try? String(contentsOf: url, encoding: .utf8) {
                 documents[existingIndex].text = text
@@ -773,6 +979,7 @@ private struct MobileIDEView: View {
             try documents[index].text.write(to: documents[index].url, atomically: true, encoding: .utf8)
             documents[index].isDirty = false
             appendLog("editor: saved \(documents[index].title)")
+            refreshCompletionSymbols()
         } catch {
             appendLog("editor: save failed: \(error)")
         }
@@ -780,7 +987,12 @@ private struct MobileIDEView: View {
 
     private func closeDocument(_ id: URL) {
         guard let index = documents.firstIndex(where: { $0.id == id }) else { return }
+        if documents[index].isDirty {
+            do { try documents[index].text.write(to: documents[index].url, atomically: true, encoding: .utf8) }
+            catch { appendLog("Could not save before closing: \(error)"); return }
+        }
         documents.remove(at: index)
+        if secondDocumentID == id { secondDocumentID = documents.first?.id }
         if activeDocumentID == id {
             activeDocumentID = documents.indices.contains(index)
                 ? documents[index].id
@@ -829,6 +1041,7 @@ private struct MobileIDEView: View {
             let progress = MobileBuildProgress()
             projectBuildProgress = progress
             latestIPA = nil
+            diagnostics = []; buildPhase = "Preparing build"; completedSteps = 0; totalSteps = 1
             isBuildingProject = true
             consoleVisible = true
             selectedConsoleTab = .build
@@ -986,7 +1199,7 @@ private struct MobileIDEView: View {
             let scoped = url.startAccessingSecurityScopedResource()
 
             let selected = MobileProject(root: url)
-            do { try selected.validate() } catch {
+            do { try selected.validate(); try saveAllDocuments() } catch {
                 if scoped { url.stopAccessingSecurityScopedResource() }
                 throw error
             }
@@ -994,9 +1207,13 @@ private struct MobileIDEView: View {
             project = selected
             projectScopeURL = scoped ? url : nil
             latestIPA = nil
-            navigatorEntries = IDEWorkspaceScanner.scan(root: url)
+            navigatorEntries = IDEWorkspaceScanner.scan(root: url, maxDepth: 15)
             documents.removeAll()
             activeDocumentID = nil
+            secondDocumentID = nil
+            lastAIEdit = nil
+            diagnostics = []
+            refreshCompletionSymbols()
             appendLog("project: \(selected.name)")
             appendLog(FileManager.default.fileExists(atPath: url.appendingPathComponent(MobileAppManifest.filename).path)
                 ? "Mobile build configuration: found" : "SwiftPM project: prepare xtool-mobile.json before building on-device")
@@ -1298,6 +1515,15 @@ private struct MobileIDEView: View {
 
     private func appendLog(_ line: String) {
         logLines.append(line)
+        while logLines.count > 500 || (logLines.count > 1 && logLines.reduce(0, { $0 + $1.utf8.count }) > 2_000_000) { logLines.removeFirst() }
+        for diagnostic in MobileSourceDiagnostic.parse(line) where diagnostic.severity != "note" {
+            if diagnostics.count < 200, !diagnostics.contains(diagnostic) { diagnostics.append(diagnostic) }
+        }
+        if line.hasPrefix("Compiling ") || line.hasPrefix("Linking ") || line == "Packaging unsigned IPA" { buildPhase = line }
+        if line.hasPrefix("Build progress:"), let value = line.split(separator: " ").last {
+            let parts = value.split(separator: "/")
+            if parts.count == 2, let done = Int(parts[0]), let total = Int(parts[1]) { completedSteps = done; totalSteps = total }
+        }
     }
 
     private func releaseSecurityScope(for url: URL?) {
@@ -1324,6 +1550,7 @@ private enum InspectorTab: String, CaseIterable, Identifiable {
 private enum ConsoleTab: String, CaseIterable, Identifiable {
     case build = "Build"
     case console = "Console"
+    case issues = "Issues"
 
     var id: String { rawValue }
 }
