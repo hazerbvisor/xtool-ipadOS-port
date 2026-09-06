@@ -42,11 +42,12 @@ private struct XIPDocumentPicker: UIViewControllerRepresentable {
     }
 
     func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
-        // Do not rely on a dynamically-created .xip UTI. On iPadOS the Files
-        // picker can display a XIP as selectable but then ignore the tap when
-        // the dynamic UTI does not exactly match the provider's declared type.
-        // Accept any file here and validate the .xip extension after selection.
-        let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.item], asCopy: false)
+        // Some iPadOS Files providers expose XIP archives but refuse an
+        // open-in-place handoff. In that case the file looks enabled yet tapping
+        // it does nothing. Force import/copy mode so the provider must hand XTool
+        // a local readable copy. XTool deletes that temporary copy after SDK
+        // extraction completes or is cancelled.
+        let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.item], asCopy: true)
         picker.allowsMultipleSelection = false
         picker.shouldShowFileExtensions = true
         picker.delegate = context.coordinator
@@ -296,7 +297,7 @@ struct IDEProjectToolsView: View {
             Section("Xcode SDK Extractor") {
                 Label("Extract iPhoneOS SDK from Xcode", systemImage: "shippingbox.and.arrow.backward")
                     .font(.headline)
-                Text("XTool reads the Xcode .xip directly and writes only iPhoneOS*.sdk into its mobile runtime. The rest of Xcode is decoded as needed but never stored on disk.")
+                Text("XTool asks iPadOS to make a temporary local copy of the Xcode .xip, extracts only iPhoneOS*.sdk into its mobile runtime, then removes the temporary XIP copy. The rest of Xcode is decoded as needed but never stored on disk.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
@@ -370,12 +371,14 @@ struct IDEProjectToolsView: View {
                 return
             }
             let hasScope = url.startAccessingSecurityScopedResource()
+            let localPickerCopy = url.standardizedFileURL.path.hasPrefix(NSHomeDirectory() + "/")
             sdkImportProgress = 0
             sdkImportStatus = "Opening \(url.lastPathComponent)…"
 
             sdkImportTask = Task {
                 defer {
                     if hasScope { url.stopAccessingSecurityScopedResource() }
+                    if localPickerCopy { try? FileManager.default.removeItem(at: url) }
                     Task { @MainActor in
                         sdkImportTask = nil
                         loadSDKStatus()
