@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "name": "XToolMobileApp",
+  "bundleIdentifier": "sh.xtool.mobile",
+  "deploymentTarget": "16.0",
+  "executableTarget": "XToolMobileApp",
+  "targets": [
+    {
+      "name": "XToolMobileCore",
+      "sources": [
+        "Sources/XToolMobileCore"
+      ],
+      "parseAsLibrary": true
+    },
+    {
+      "name": "XToolMobileApp",
+      "sources": [
+        "Sources/XToolMobileApp"
+      ],
+      "dependencies": [
+        "XToolMobileCore"
+      ],
+      "parseAsLibrary": false
+    }
+  ],
+  "frameworks": [
+    "CryptoKit",
+    "Foundation",
+    "Security",
+    "SwiftUI",
+    "UIKit"
+  ],
+  "shortVersion": "1.0",
+  "buildVersion": "1",
+  "reuseCompilerEngine": true,
+  "reuseBundledRuntime": true
+}
