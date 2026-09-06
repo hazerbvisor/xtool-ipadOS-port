@@ -97,10 +97,6 @@ public enum MobileXcodeSDKInstaller {
         }
         try fileManager.createDirectory(at: sdkDirectory, withIntermediateDirectories: true)
 
-        // Pin the currently selected SDK before introducing another directory.
-        // PreparedToolchain historically selected the lexicographically newest
-        // SDK, which could otherwise switch builds to an incompatible SDK simply
-        // because extraction finished.
         let oldSelected = try? toolchain.iPhoneOSSDK(fileManager: fileManager)
         if toolchain.preferrediPhoneOSSDKName(fileManager: fileManager) == nil,
            let oldSelected {
@@ -141,9 +137,6 @@ public enum MobileXcodeSDKInstaller {
             throw MobileSDKImportError.noSDKFound
         }
 
-        // Activate the newest imported SDK only when the matching prebuilt Swift
-        // stdlib cache is available. A full Apple SDK alone does not replace the
-        // version-matched upstream Swift module XTool's embedded frontend needs.
         let activationCandidate = installed.sorted(by: sdkNameLessThan).last!
         let activationURL = sdkDirectory.appendingPathComponent(activationCandidate, isDirectory: true)
         let canActivate = toolchain.hasPrebuiltSwiftModule(
@@ -307,7 +300,7 @@ private final class MobileXcodeXIPSDKExtractor: @unchecked Sendable {
                     expectedSize: Int(decompressedSize),
                     algorithm: COMPRESSION_LZMA
                 )
-            } else if compressedSize == decompressedSize || compressedSize == chunkSize {
+            } else if compressedSize == chunkSize {
                 decoded = compressed
             } else {
                 throw MobileSDKImportError.malformedArchive(
@@ -361,8 +354,6 @@ private final class MobileXcodeXIPSDKExtractor: @unchecked Sendable {
 
         try handle.seek(toOffset: headerSize)
         let compressedTOC = try readExactly(Int(tocCompressedSize), from: handle)
-        // Apple's Compression zlib decoder expects the deflate stream without
-        // RFC 1950 CMF/FLG. This matches the approach used by unxip on Apple OSes.
         let tocData = try decode(
             Data(compressedTOC.dropFirst(2)),
             expectedSize: Int(tocDecompressedSize),
@@ -381,9 +372,6 @@ private final class MobileXcodeXIPSDKExtractor: @unchecked Sendable {
         )
     }
 
-    /// Tiny purpose-built SAX-style parser for the XAR TOC. It avoids pulling
-    /// FoundationXML/libxml2 into the mobile compiler target and only records the
-    /// `<file>` whose `<name>` is exactly `Content`.
     private func parseContentRecord(in xml: String) -> (offset: UInt64, length: UInt64)? {
         struct Record {
             var name = ""
