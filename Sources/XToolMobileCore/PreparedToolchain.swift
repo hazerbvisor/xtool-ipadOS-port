@@ -53,6 +53,14 @@ public struct PreparedToolchain: Sendable, Hashable {
         root.appendingPathComponent("XToolRuntimeRevision.txt")
     }
 
+    /// Optional selection marker used when multiple iPhoneOS SDKs are installed.
+    /// Without this marker older builds selected the lexicographically newest
+    /// SDK, which is unsafe once users can import SDKs independently of the
+    /// version-matched Swift runtime bundled by XTool.
+    public var preferrediPhoneOSSDKURL: URL {
+        root.appendingPathComponent("XToolPreferredSDK.txt")
+    }
+
     private var isXToolBundledRuntimeRoot: Bool {
         root.lastPathComponent == "XToolMobileRuntime"
     }
@@ -64,6 +72,39 @@ public struct PreparedToolchain: Sendable, Hashable {
         }
         let value = text.trimmingCharacters(in: .whitespacesAndNewlines)
         return value.isEmpty ? nil : value
+    }
+
+    public func preferrediPhoneOSSDKName(fileManager: FileManager = .default) -> String? {
+        guard fileManager.fileExists(atPath: preferrediPhoneOSSDKURL.path),
+              let text = try? String(contentsOf: preferrediPhoneOSSDKURL, encoding: .utf8) else {
+            return nil
+        }
+        let value = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard value.hasPrefix("iPhoneOS"), value.hasSuffix(".sdk"),
+              !value.contains("/"), !value.contains("\\") else {
+            return nil
+        }
+        return value
+    }
+
+    /// Pins the SDK used by subsequent builds. The SDK directory must already
+    /// exist inside this prepared toolchain.
+    public func setPreferrediPhoneOSSDK(
+        named name: String,
+        fileManager: FileManager = .default
+    ) throws {
+        guard name.hasPrefix("iPhoneOS"), name.hasSuffix(".sdk"),
+              !name.contains("/"), !name.contains("\\") else {
+            throw MobileBuildBackendError.toolchainInvalid("Invalid iPhoneOS SDK name: \(name)")
+        }
+        let sdkDirectory = iPhoneOSPlatform.appendingPathComponent("Developer/SDKs", isDirectory: true)
+        let candidate = sdkDirectory.appendingPathComponent(name, isDirectory: true)
+        var isDirectory: ObjCBool = false
+        guard fileManager.fileExists(atPath: candidate.path, isDirectory: &isDirectory),
+              isDirectory.boolValue else {
+            throw MobileBuildBackendError.toolchainInvalid("Selected iPhoneOS SDK is missing: \(name)")
+        }
+        try Data((name + "\n").utf8).write(to: preferrediPhoneOSSDKURL, options: .atomic)
     }
 
     /// Validate the imported Darwin target SDK/runtime tree.
@@ -136,6 +177,15 @@ public struct PreparedToolchain: Sendable, Hashable {
         )
     }
 
+    /// Returns whether XTool's embedded Swift frontend has the version-matched
+    /// prebuilt Swift stdlib module required to safely make this SDK active.
+    public func hasPrebuiltSwiftModule(
+        for sdk: URL,
+        fileManager: FileManager = .default
+    ) -> Bool {
+        (try? validateBundledSwiftModule(sdk: sdk, fileManager: fileManager)) != nil
+    }
+
     private func validateBundledSwiftModule(
         sdk: URL,
         fileManager: FileManager
@@ -174,7 +224,9 @@ public struct PreparedToolchain: Sendable, Hashable {
         }
     }
 
-    /// Finds the newest installed iPhoneOS SDK in the prepared Darwin tree.
+    /// Finds the selected iPhoneOS SDK in the prepared Darwin tree. When no
+    /// explicit selection exists, falls back to the newest installed SDK to
+    /// preserve behavior for imported/external toolchains.
     public func iPhoneOSSDK(fileManager: FileManager = .default) throws -> URL {
         let sdkDirectory = iPhoneOSPlatform.appendingPathComponent("Developer/SDKs", isDirectory: true)
         let contents = try fileManager.contentsOfDirectory(
@@ -182,12 +234,39 @@ public struct PreparedToolchain: Sendable, Hashable {
             includingPropertiesForKeys: [.isDirectoryKey],
             options: [.skipsHiddenFiles]
         )
-        guard let sdk = contents
-            .filter({ $0.pathExtension == "sdk" && $0.lastPathComponent.hasPrefix("iPhoneOS") })
-            .sorted(by: { $0.lastPathComponent > $1.lastPathComponent })
+        let candidates = contents.filter {
+            $0.pathExtension == "sdk" && $0.lastPathComponent.hasPrefix("iPhoneOS")
+        }
+
+        if let preferredName = preferrediPhoneOSSDKName(fileManager: fileManager),
+           let preferred = candidates.first(where: { $0.lastPathComponent == preferredName }) {
+            return preferred
+        }
+
+        guard let sdk = candidates
+            .sorted(by: { compareSDKNames($0.lastPathComponent, $1.lastPathComponent) == .orderedDescending })
             .first else {
             throw MobileBuildBackendError.toolchainInvalid("No iPhoneOS SDK was found")
         }
         return sdk
+    }
+
+    private func compareSDKNames(_ lhs: String, _ rhs: String) -> ComparisonResult {
+        let lhsVersion = sdkVersionComponents(lhs)
+        let rhsVersion = sdkVersionComponents(rhs)
+        let count = max(lhsVersion.count, rhsVersion.count)
+        for index in 0..<count {
+            let l = index < lhsVersion.count ? lhsVersion[index] : 0
+            let r = index < rhsVersion.count ? rhsVersion[index] : 0
+            if l < r { return .orderedAscending }
+            if l > r { return .orderedDescending }
+        }
+        return lhs.compare(rhs)
+    }
+
+    private func sdkVersionComponents(_ name: String) -> [Int] {
+        let stem = name.hasSuffix(".sdk") ? String(name.dropLast(4)) : name
+        let version = stem.hasPrefix("iPhoneOS") ? String(stem.dropFirst("iPhoneOS".count)) : stem
+        return version.split(separator: ".").map { Int($0) ?? 0 }
     }
 }

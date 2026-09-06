@@ -24,6 +24,7 @@
     }
   ],
   "frameworks": [
+    "Compression",
     "CryptoKit",
     "Foundation",
     "Security",
