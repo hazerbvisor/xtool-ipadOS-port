@@ -30,6 +30,7 @@
     "SwiftUI",
     "UIKit"
   ],
+  "infoPlist": "XToolMobileInfo.plist",
   "shortVersion": "1.0",
   "buildVersion": "1",
   "reuseCompilerEngine": true,
