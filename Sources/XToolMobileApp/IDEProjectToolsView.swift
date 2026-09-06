@@ -51,6 +51,8 @@ struct IDEProjectToolsView: View {
     @State private var history: [URL] = []
     @State private var recovered: MobileRecoveredBuildLog?
     @State private var showLog = false
+    @State private var pendingBuildDeletion: URL?
+    @State private var showDeleteBuildConfirmation = false
     private var builds: URL { FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent("Builds") }
     var body: some View {
         VStack {
@@ -103,8 +105,18 @@ struct IDEProjectToolsView: View {
                     }
                 }
                 List(history, id: \.self) { folder in
-                    VStack(alignment: .leading) {
-                        Text(folder.lastPathComponent).font(.caption)
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack(alignment: .firstTextBaseline) {
+                            Text(folder.lastPathComponent).font(.caption)
+                            Spacer()
+                            Button(role: .destructive) {
+                                pendingBuildDeletion = folder
+                                showDeleteBuildConfirmation = true
+                            } label: {
+                                Label("Delete", systemImage: "trash")
+                            }
+                            .buttonStyle(.borderless)
+                        }
                         Button("View / share log") {
                             Task {
                                 do { recovered = try await Task.detached { try MobileBuildLogRecovery.recover(in: folder) }.value; showLog = true }
@@ -121,6 +133,20 @@ struct IDEProjectToolsView: View {
             Text(message).font(.caption).textSelection(.enabled).padding(.horizontal)
         }.padding().navigationTitle("Workspace Tools")
             .onAppear { path = initialPath; tab = initialTab; loadHistory() }
+            .confirmationDialog(
+                "Delete build?",
+                isPresented: $showDeleteBuildConfirmation,
+                presenting: pendingBuildDeletion
+            ) { folder in
+                Button("Delete \(folder.lastPathComponent)", role: .destructive) {
+                    deleteBuild(folder)
+                }
+                Button("Cancel", role: .cancel) {
+                    pendingBuildDeletion = nil
+                }
+            } message: { _ in
+                Text("This permanently removes the build folder, build log, and any generated IPA inside it. This cannot be undone.")
+            }
             .sheet(isPresented: $showLog) {
                 NavigationStack {
                     if let recovered {
@@ -172,5 +198,22 @@ struct IDEProjectToolsView: View {
                     }.prefix(50).map { $0 }
             }.value
         }
+    }
+    private func deleteBuild(_ folder: URL) {
+        let target = folder.standardizedFileURL
+        let buildsRoot = builds.standardizedFileURL
+        guard target.deletingLastPathComponent() == buildsRoot else {
+            message = "Refusing to delete a folder outside the Builds directory."
+            pendingBuildDeletion = nil
+            return
+        }
+        do {
+            try FileManager.default.removeItem(at: target)
+            history.removeAll { $0.standardizedFileURL == target }
+            message = "Deleted build \(target.lastPathComponent)."
+        } catch {
+            message = "Could not delete build: \(error)"
+        }
+        pendingBuildDeletion = nil
     }
 }
