@@ -189,7 +189,7 @@ public final class MobileCompilerEngine: MobileProjectCompiler, @unchecked Senda
         diagnosticsURL: URL?
     ) throws -> MobileBuildResult {
         let capture = try captureStandardError(persistingTo: diagnosticsURL) {
-            try withCStringArray(arguments) { argc, argv in
+            withCStringArray(arguments) { argc, argv in
                 function(argc, argv)
             }
         }
