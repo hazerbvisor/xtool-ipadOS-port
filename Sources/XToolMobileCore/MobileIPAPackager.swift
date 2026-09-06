@@ -58,10 +58,14 @@ public enum MobileIPAPackager {
 
         try MobileAppManifest.validateName(configuration.productName)
         try MobileAppManifest.validateName(configuration.executableName)
-        let appRoot = "Payload/\(configuration.productName).app"
-        let infoPlist = try makeInfoPlist(configuration: configuration, additional: additionalInfoPlist)
-        var names: Set<String> = [configuration.executableName.lowercased(), "info.plist"]
 
+        let appRoot = "Payload/\(configuration.productName).app"
+        let infoPlist = try makeInfoPlist(
+            configuration: configuration,
+            additional: additionalInfoPlist
+        )
+
+        var names: Set<String> = [configuration.executableName.lowercased(), "info.plist"]
         var entries: [StoreZIP.Entry] = [
             .file(
                 sourceURL: executableURL,
@@ -79,13 +83,20 @@ public enum MobileIPAPackager {
             guard fileManager.fileExists(atPath: file.sourceURL.path) else {
                 throw PackagerError.missingInput(file.sourceURL.path)
             }
+
             let relative = file.relativePath
             let key = relative.lowercased()
-            guard !relative.isEmpty, !relative.hasPrefix("/"), !relative.contains("\\"),
-                  !relative.split(separator: "/", omittingEmptySubsequences: false).contains(where: { $0.isEmpty || $0 == "." || $0 == ".." }),
-                  !names.contains(where: { $0 == key || $0.hasPrefix(key + "/") || key.hasPrefix($0 + "/") }) else {
+            guard !relative.isEmpty,
+                  !relative.hasPrefix("/"),
+                  !relative.contains("\\"),
+                  !relative.split(separator: "/", omittingEmptySubsequences: false)
+                    .contains(where: { $0.isEmpty || $0 == "." || $0 == ".." }),
+                  !names.contains(where: {
+                      $0 == key || $0.hasPrefix(key + "/") || key.hasPrefix($0 + "/")
+                  }) else {
                 throw PackagerError.invalidArchivePath(file.relativePath)
             }
+
             names.insert(key)
             entries.append(
                 .file(
@@ -100,10 +111,21 @@ public enum MobileIPAPackager {
             at: outputURL.deletingLastPathComponent(),
             withIntermediateDirectories: true
         )
-        // Write alongside the destination; failures never expose a partial IPA.
-        let temporary = outputURL.deletingLastPathComponent().appendingPathComponent(".\(UUID().uuidString).ipa")
+
+        // Write alongside the destination. A failed compression never leaves a
+        // tiny/partial IPA at the final output path.
+        let temporary = outputURL.deletingLastPathComponent()
+            .appendingPathComponent(".\(UUID().uuidString).ipa")
         defer { try? fileManager.removeItem(at: temporary) }
+
         try StoreZIP.write(entries: entries, to: temporary)
+
+        let archiveSize = ((try fileManager.attributesOfItem(atPath: temporary.path)[.size]) as? NSNumber)?
+            .uint64Value ?? 0
+        guard archiveSize > 0 else {
+            throw PackagerError.invalidArchive("packager produced an empty IPA")
+        }
+
         if fileManager.fileExists(atPath: outputURL.path) {
             _ = try fileManager.replaceItemAt(outputURL, withItemAt: temporary)
         } else {
@@ -111,7 +133,10 @@ public enum MobileIPAPackager {
         }
     }
 
-    private static func makeInfoPlist(configuration: MobileIPAConfiguration, additional: [String: Any]) throws -> Data {
+    private static func makeInfoPlist(
+        configuration: MobileIPAConfiguration,
+        additional: [String: Any]
+    ) throws -> Data {
         var plist: [String: Any] = [
             "CFBundleDevelopmentRegion": "en",
             "CFBundleDisplayName": configuration.displayName,
@@ -138,12 +163,13 @@ public enum MobileIPAPackager {
                 "UIInterfaceOrientationLandscapeRight",
             ],
         ]
+
         plist.merge(additional) { _, custom in custom }
-        // Identity and executable paths must agree with what was actually packaged.
         plist["CFBundleExecutable"] = configuration.executableName
         plist["CFBundleIdentifier"] = configuration.bundleIdentifier
         plist["CFBundlePackageType"] = "APPL"
         plist["MinimumOSVersion"] = configuration.minimumOSVersion
+
         return try PropertyListSerialization.data(
             fromPropertyList: plist,
             format: .xml,
@@ -157,6 +183,7 @@ public enum MobileIPAPackager {
         case fileTooLarge(String)
         case archiveTooLarge
         case compressionFailed(String)
+        case invalidArchive(String)
 
         public var description: String {
             switch self {
@@ -170,6 +197,8 @@ public enum MobileIPAPackager {
                 return "ZIP32 archive exceeded 4 GiB"
             case .compressionFailed(let path):
                 return "failed to deflate IPA input: \(path)"
+            case .invalidArchive(let reason):
+                return "invalid IPA archive: \(reason)"
             }
         }
     }
@@ -188,13 +217,8 @@ private enum StoreZIP {
 
         var archivePath: String {
             switch self {
-            case .file(_, let path, _), .data(_, let path, _): return path
-            }
-        }
-
-        var unixMode: UInt32 {
-            switch self {
-            case .file(_, _, let mode), .data(_, _, let mode): return mode
+            case .file(_, let path, _), .data(_, let path, _):
+                return path
             }
         }
     }
@@ -222,6 +246,7 @@ private enum StoreZIP {
         guard entries.count <= Int(UInt16.max) else {
             throw MobileIPAPackager.PackagerError.archiveTooLarge
         }
+
         _ = FileManager.default.createFile(atPath: outputURL.path, contents: nil)
         let handle = try FileHandle(forWritingTo: outputURL)
         defer { try? handle.close() }
@@ -234,6 +259,7 @@ private enum StoreZIP {
             guard offset <= UInt64(UInt32.max) else {
                 throw MobileIPAPackager.PackagerError.archiveTooLarge
             }
+
             let localHeaderOffset = UInt32(offset)
             let nameData = Data(entry.archivePath.utf8)
             guard nameData.count <= Int(UInt16.max) else {
@@ -246,6 +272,7 @@ private enum StoreZIP {
                 guard data.count <= Int(UInt32.max) else {
                     throw MobileIPAPackager.PackagerError.archiveTooLarge
                 }
+
                 let size = UInt32(data.count)
                 let crc32 = CRC32.checksum(data)
                 let header = localHeader(
@@ -258,9 +285,11 @@ private enum StoreZIP {
                     compressedSize: size,
                     uncompressedSize: size
                 )
+
                 try handle.write(contentsOf: header)
                 try handle.write(contentsOf: data)
                 offset += UInt64(header.count) + UInt64(data.count)
+
                 prepared.append(
                     PreparedEntry(
                         unixMode: unixMode,
@@ -295,6 +324,7 @@ private enum StoreZIP {
                     compressedSize: 0,
                     uncompressedSize: 0
                 )
+
                 try handle.write(contentsOf: header)
                 offset += UInt64(header.count)
 
@@ -308,6 +338,21 @@ private enum StoreZIP {
                 } else {
                     result = try streamStoredFile(sourceURL, to: handle)
                 }
+
+                // Critical integrity check: the streaming compressor must consume
+                // exactly the source file. This catches the old 2 KB IPA bug where
+                // src_size stayed zero and almost no input reached the compressor.
+                guard UInt64(result.uncompressedSize) == fileSize else {
+                    throw MobileIPAPackager.PackagerError.invalidArchive(
+                        "\(sourceURL.lastPathComponent) expected \(fileSize) bytes, encoded \(result.uncompressedSize)"
+                    )
+                }
+                guard fileSize == 0 || result.compressedSize > 0 else {
+                    throw MobileIPAPackager.PackagerError.invalidArchive(
+                        "\(sourceURL.lastPathComponent) produced an empty ZIP entry"
+                    )
+                }
+
                 offset += UInt64(result.compressedSize)
 
                 let descriptor = dataDescriptor(
@@ -427,7 +472,9 @@ private enum StoreZIP {
             "7z", "aac", "bz2", "gif", "gz", "heic", "heif", "ipa", "jpeg", "jpg",
             "lz4", "m4a", "mov", "mp3", "mp4", "pdf", "png", "webp", "xz", "zip",
         ])
-        return alreadyCompressed.contains(url.pathExtension.lowercased()) ? storedMethod : deflateMethod
+        return alreadyCompressed.contains(url.pathExtension.lowercased())
+            ? storedMethod
+            : deflateMethod
         #else
         return storedMethod
         #endif
@@ -436,15 +483,18 @@ private enum StoreZIP {
     private static func streamStoredFile(_ url: URL, to output: FileHandle) throws -> StreamResult {
         let input = try FileHandle(forReadingFrom: url)
         defer { try? input.close() }
+
         var crc = CRC32.initial
         var total: UInt64 = 0
 
         while true {
             let chunk = try input.read(upToCount: ioBufferSize) ?? Data()
             if chunk.isEmpty { break }
+
             crc = CRC32.update(crc, with: chunk)
             try output.write(contentsOf: chunk)
             total += UInt64(chunk.count)
+
             guard total <= UInt64(UInt32.max) else {
                 throw MobileIPAPackager.PackagerError.fileTooLarge(url.path)
             }
@@ -473,63 +523,99 @@ private enum StoreZIP {
             src_size: 0,
             state: nil
         )
-        var status = compression_stream_init(&stream, COMPRESSION_STREAM_ENCODE, COMPRESSION_ZLIB)
-        guard status != COMPRESSION_STATUS_ERROR else {
+
+        let initialization = compression_stream_init(
+            &stream,
+            COMPRESSION_STREAM_ENCODE,
+            COMPRESSION_ZLIB
+        )
+        guard initialization != COMPRESSION_STATUS_ERROR else {
             throw MobileIPAPackager.PackagerError.compressionFailed(url.path)
         }
         defer { compression_stream_destroy(&stream) }
 
-        stream.src_size = 0
-        stream.dst_ptr = destination
-        stream.dst_size = ioBufferSize
-
-        var sourceData = Data()
         var crc = CRC32.initial
         var uncompressed: UInt64 = 0
         var compressed: UInt64 = 0
 
-        repeat {
-            let needsInput = stream.src_size == 0
-            if needsInput {
-                sourceData = try input.read(upToCount: ioBufferSize) ?? Data()
-                if !sourceData.isEmpty {
-                    crc = CRC32.update(crc, with: sourceData)
-                    uncompressed += UInt64(sourceData.count)
-                    guard uncompressed <= UInt64(UInt32.max) else {
-                        throw MobileIPAPackager.PackagerError.fileTooLarge(url.path)
-                    }
-                }
+        func writeOutput(_ count: Int) throws {
+            guard count > 0 else { return }
+            let data = Data(bytesNoCopy: destination, count: count, deallocator: .none)
+            try output.write(contentsOf: data)
+            compressed += UInt64(count)
+            guard compressed <= UInt64(UInt32.max) else {
+                throw MobileIPAPackager.PackagerError.archiveTooLarge
             }
+        }
 
-            sourceData.withUnsafeBytes { rawBuffer in
-                if let baseAddress = rawBuffer.bindMemory(to: UInt8.self).baseAddress {
-                    stream.src_ptr = baseAddress.advanced(by: sourceData.count - stream.src_size)
-                } else {
+        while true {
+            let sourceData = try input.read(upToCount: ioBufferSize) ?? Data()
+
+            if sourceData.isEmpty {
+                // EOF is finalized separately instead of guessing from a short
+                // read. That also handles files whose size is exactly 1 MiB*n.
+                while true {
                     stream.src_ptr = UnsafePointer(destination)
-                }
-                let flags = sourceData.count < ioBufferSize
-                    ? Int32(COMPRESSION_STREAM_FINALIZE.rawValue)
-                    : 0
-                status = compression_stream_process(&stream, flags)
-            }
+                    stream.src_size = 0
+                    stream.dst_ptr = destination
+                    stream.dst_size = ioBufferSize
 
-            switch status {
-            case COMPRESSION_STATUS_OK, COMPRESSION_STATUS_END:
-                let produced = ioBufferSize - stream.dst_size
-                if produced > 0 {
-                    let data = Data(bytesNoCopy: destination, count: produced, deallocator: .none)
-                    try output.write(contentsOf: data)
-                    compressed += UInt64(produced)
-                    guard compressed <= UInt64(UInt32.max) else {
-                        throw MobileIPAPackager.PackagerError.archiveTooLarge
+                    let status = compression_stream_process(
+                        &stream,
+                        Int32(COMPRESSION_STREAM_FINALIZE.rawValue)
+                    )
+                    let produced = ioBufferSize - stream.dst_size
+                    try writeOutput(produced)
+
+                    if status == COMPRESSION_STATUS_END {
+                        break
+                    }
+                    guard status == COMPRESSION_STATUS_OK, produced > 0 else {
+                        throw MobileIPAPackager.PackagerError.compressionFailed(url.path)
                     }
                 }
-                stream.dst_ptr = destination
-                stream.dst_size = ioBufferSize
-            default:
-                throw MobileIPAPackager.PackagerError.compressionFailed(url.path)
+                break
             }
-        } while status == COMPRESSION_STATUS_OK
+
+            crc = CRC32.update(crc, with: sourceData)
+            uncompressed += UInt64(sourceData.count)
+            guard uncompressed <= UInt64(UInt32.max) else {
+                throw MobileIPAPackager.PackagerError.fileTooLarge(url.path)
+            }
+
+            var consumed = 0
+            while consumed < sourceData.count {
+                var status = COMPRESSION_STATUS_ERROR
+                var consumedThisPass = 0
+                var produced = 0
+
+                sourceData.withUnsafeBytes { rawBuffer in
+                    guard let baseAddress = rawBuffer.bindMemory(to: UInt8.self).baseAddress else {
+                        return
+                    }
+
+                    let remaining = sourceData.count - consumed
+                    stream.src_ptr = baseAddress.advanced(by: consumed)
+                    stream.src_size = remaining
+                    stream.dst_ptr = destination
+                    stream.dst_size = ioBufferSize
+
+                    status = compression_stream_process(&stream, 0)
+                    consumedThisPass = remaining - stream.src_size
+                    produced = ioBufferSize - stream.dst_size
+                }
+
+                guard status == COMPRESSION_STATUS_OK else {
+                    throw MobileIPAPackager.PackagerError.compressionFailed(url.path)
+                }
+                guard consumedThisPass > 0 || produced > 0 else {
+                    throw MobileIPAPackager.PackagerError.compressionFailed(url.path)
+                }
+
+                consumed += consumedThisPass
+                try writeOutput(produced)
+            }
+        }
 
         return StreamResult(
             crc32: CRC32.finalize(crc),
@@ -541,10 +627,7 @@ private enum StoreZIP {
 
     private static func dosTimestamp(_ date: Date) -> (UInt16, UInt16) {
         let calendar = Calendar(identifier: .gregorian)
-        let parts = calendar.dateComponents(
-            in: TimeZone.current,
-            from: date
-        )
+        let parts = calendar.dateComponents(in: TimeZone.current, from: date)
         let year = min(max(parts.year ?? 1980, 1980), 2107)
         let month = min(max(parts.month ?? 1, 1), 12)
         let day = min(max(parts.day ?? 1, 1), 31)
