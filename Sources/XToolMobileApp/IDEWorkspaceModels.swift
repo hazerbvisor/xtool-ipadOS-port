@@ -69,7 +69,7 @@ enum IDEWorkspaceScanner {
         entries: inout [IDEFileEntry]
     ) {
         guard depth <= maxDepth else { return }
-        let keys: [URLResourceKey] = [.isDirectoryKey, .isRegularFileKey, .isHiddenKey]
+        let keys: [URLResourceKey] = [.isDirectoryKey, .isRegularFileKey, .isHiddenKey, .isSymbolicLinkKey]
         guard let children = try? FileManager.default.contentsOfDirectory(
             at: directory,
             includingPropertiesForKeys: keys,
@@ -84,7 +84,7 @@ enum IDEWorkspaceScanner {
         }
 
         for child in sorted {
-            guard let values = try? child.resourceValues(forKeys: Set(keys)), values.isHidden != true else { continue }
+            guard let values = try? child.resourceValues(forKeys: Set(keys)), values.isHidden != true, values.isSymbolicLink != true else { continue }
             let isDirectory = values.isDirectory == true
             if isDirectory && ignoredDirectories.contains(child.lastPathComponent) { continue }
 

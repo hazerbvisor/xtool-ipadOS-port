@@ -48,6 +48,7 @@ private final class RecordingCompiler: MobileProjectCompiler, @unchecked Sendabl
         let fm = FileManager.default
         let root = fm.temporaryDirectory.appendingPathComponent("xtool-project-tests-\(UUID().uuidString)")
         defer { try? fm.removeItem(at: root) }
+        try workspaceChecks(in: root.appendingPathComponent("WorkspaceChecks"))
         let project = try MobileAppStarter.create(in: root)
         let toolchain = PreparedToolchain(root: root.appendingPathComponent("SDKFixture"))
         try fm.createDirectory(at: toolchain.iPhoneOSPlatform.appendingPathComponent("Developer/SDKs/iPhoneOS26.5.sdk"), withIntermediateDirectories: true)
@@ -187,4 +188,51 @@ private final class RecordingCompiler: MobileProjectCompiler, @unchecked Sendabl
         }
         print("PASS: dependency order, multi-file jobs, iOS runtime linkage/discovery/preflight, IPA output, failure handling, cycles and archive paths")
     }
+}
+
+
+private func workspaceChecks(in root: URL) throws {
+    let fm = FileManager.default
+    try fm.createDirectory(at: root, withIntermediateDirectories: true)
+    func rejects(_ message: String, _ action: () throws -> Void) throws {
+        do { try action() } catch { return }
+        throw NSError(domain: "TEST FAILED: " + message, code: 1)
+    }
+    let file = try MobileWorkspaceTools.create("Sources/a.swift", directory: false, in: root)
+    try "before".write(to: file, atomically: true, encoding: .utf8)
+    for path in ["../escape", "/escape", "Sources/../../escape", ".xtool/chat.json", "a//b"] {
+        try rejects("unsafe path accepted") { _ = try MobileWorkspaceTools.destination(path, in: root) }
+    }
+    try fm.createSymbolicLink(at: root.appendingPathComponent("outside"), withDestinationURL: root.deletingLastPathComponent())
+    try rejects("symlink escape accepted") { _ = try MobileWorkspaceTools.create("outside/escape.swift", directory: false, in: root) }
+    try rejects("stale batch changed files") {
+        _ = try MobileWorkspaceTools.apply([.init(path: "new.swift", content: "new"), .init(path: "Sources/a.swift", content: "after")], expected: ["Sources/a.swift": "stale"], in: root)
+    }
+    try require(!fm.fileExists(atPath: root.appendingPathComponent("new.swift").path), "batch preflight is atomic")
+    try rejects("unseen existing file accepted") {
+        _ = try MobileWorkspaceTools.apply([.init(path: "Sources/a.swift", content: nil)], expected: [:], in: root)
+    }
+    let batch = try MobileWorkspaceTools.apply([.init(path: "Sources/a.swift", content: "after"), .init(path: "new.swift", content: "new")], expected: ["Sources/a.swift": "before"], in: root)
+    try "user edit".write(to: file, atomically: true, encoding: .utf8)
+    try rejects("undo overwrote a subsequent user edit") { try MobileWorkspaceTools.undo(batch, in: root) }
+    try "after".write(to: file, atomically: true, encoding: .utf8)
+    try MobileWorkspaceTools.undo(batch, in: root)
+    let restored = try String(contentsOf: file, encoding: .utf8)
+    try require(restored == "before" && !fm.fileExists(atPath: root.appendingPathComponent("new.swift").path), "undo restores updates and removes creations")
+    let deletion = try MobileWorkspaceTools.apply([.init(path: "Sources/a.swift", content: nil)], expected: ["Sources/a.swift": "before"], in: root)
+    try MobileWorkspaceTools.undo(deletion, in: root)
+    let renamed = try MobileWorkspaceTools.rename("Sources/a.swift", to: "Sources/b.swift", in: root)
+    let trash = try MobileWorkspaceTools.trash("Sources/b.swift", in: root)
+    try require(!fm.fileExists(atPath: renamed.path) && fm.fileExists(atPath: trash.path), "trash preserves original")
+    let diagnostics = MobileSourceDiagnostic.parse("/some path/File.swift:12:3: error: missing value\nnoise\nFile.swift:2:1: warning: unused")
+    try require(diagnostics.count == 2 && diagnostics[0].line == 12 && diagnostics[0].path == "/some path/File.swift", "parse diagnostics with spaces")
+    let cache = try MobileModuleCache.directory(in: root, identity: "compiler-a/sdk-a")
+    try fm.createDirectory(at: cache, withIntermediateDirectories: true)
+    try Data().write(to: cache.appendingPathComponent("sentinel"))
+    let reused = try MobileModuleCache.directory(in: root, identity: "compiler-a/sdk-a")
+    let changed = try MobileModuleCache.directory(in: root, identity: "compiler-b/sdk-a")
+    try require(cache == reused && cache != changed && fm.fileExists(atPath: reused.appendingPathComponent("sentinel").path), "cache reuse and compiler invalidation")
+    try MobileModuleCache.clear(in: root)
+    try require(!fm.fileExists(atPath: cache.path), "cache clearing")
+    print("PASS: workspace paths, stale-edit preflight, edit undo, trash, diagnostics and cache identity")
 }
