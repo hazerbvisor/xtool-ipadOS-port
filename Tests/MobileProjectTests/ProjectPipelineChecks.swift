@@ -205,6 +205,13 @@ private func workspaceChecks(in root: URL) throws {
     }
     try fm.createSymbolicLink(at: root.appendingPathComponent("outside"), withDestinationURL: root.deletingLastPathComponent())
     try rejects("symlink escape accepted") { _ = try MobileWorkspaceTools.create("outside/escape.swift", directory: false, in: root) }
+    try require(!fm.fileExists(atPath: root.deletingLastPathComponent().appendingPathComponent("escape.swift").path), "rejected link must not create outside file")
+    try fm.createSymbolicLink(atPath: root.appendingPathComponent("dangling").path, withDestinationPath: "../missing-directory")
+    try rejects("dangling parent accepted") { _ = try MobileWorkspaceTools.create("dangling/new.swift", directory: false, in: root) }
+    try fm.createSymbolicLink(atPath: root.appendingPathComponent("alias.swift").path, withDestinationPath: "Sources/a.swift")
+    try rejects("symlink leaf accepted") { _ = try MobileWorkspaceTools.destination("alias.swift", in: root) }
+    let nested = try MobileWorkspaceTools.create("New/Nested/file.swift", directory: false, in: root)
+    try require(fm.fileExists(atPath: nested.path), "ordinary nonexistent parents remain supported")
     try rejects("stale batch changed files") {
         _ = try MobileWorkspaceTools.apply([.init(path: "new.swift", content: "new"), .init(path: "Sources/a.swift", content: "after")], expected: ["Sources/a.swift": "stale"], in: root)
     }
