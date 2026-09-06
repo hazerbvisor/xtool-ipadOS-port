@@ -1,5 +1,6 @@
 import SwiftUI
 import UniformTypeIdentifiers
+import UIKit
 import XToolMobileCore
 
 struct IDEResizeHandle: View {
@@ -31,6 +32,44 @@ private struct IDEWorkspaceHit: Identifiable, Sendable {
     let line: Int
     let text: String
     var id: String { "\(path):\(line)" }
+}
+
+private struct XIPDocumentPicker: UIViewControllerRepresentable {
+    let onResult: (Result<[URL], Error>) -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onResult: onResult)
+    }
+
+    func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
+        // Do not rely on a dynamically-created .xip UTI. On iPadOS the Files
+        // picker can display a XIP as selectable but then ignore the tap when
+        // the dynamic UTI does not exactly match the provider's declared type.
+        // Accept any file here and validate the .xip extension after selection.
+        let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.item], asCopy: false)
+        picker.allowsMultipleSelection = false
+        picker.shouldShowFileExtensions = true
+        picker.delegate = context.coordinator
+        return picker
+    }
+
+    func updateUIViewController(_ uiViewController: UIDocumentPickerViewController, context: Context) {}
+
+    final class Coordinator: NSObject, UIDocumentPickerDelegate {
+        let onResult: (Result<[URL], Error>) -> Void
+
+        init(onResult: @escaping (Result<[URL], Error>) -> Void) {
+            self.onResult = onResult
+        }
+
+        func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+            onResult(.success(urls))
+        }
+
+        func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
+            onResult(.success([]))
+        }
+    }
 }
 
 struct IDEProjectToolsView: View {
@@ -65,10 +104,6 @@ struct IDEProjectToolsView: View {
     private var builds: URL {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Builds")
-    }
-
-    private var xipType: UTType {
-        UTType(filenameExtension: "xip") ?? .data
     }
 
     var body: some View {
@@ -215,12 +250,12 @@ struct IDEProjectToolsView: View {
             loadHistory()
             loadSDKStatus()
         }
-        .fileImporter(
-            isPresented: $showingXIPImporter,
-            allowedContentTypes: [xipType],
-            allowsMultipleSelection: false
-        ) { result in
-            beginSDKImport(result)
+        .sheet(isPresented: $showingXIPImporter) {
+            XIPDocumentPicker { result in
+                showingXIPImporter = false
+                beginSDKImport(result)
+            }
+            .ignoresSafeArea()
         }
         .confirmationDialog(
             "Delete build?",
@@ -326,7 +361,14 @@ struct IDEProjectToolsView: View {
         case .failure(let error):
             sdkImportStatus = "Could not open XIP: \(error.localizedDescription)"
         case .success(let urls):
-            guard let url = urls.first else { return }
+            guard let url = urls.first else {
+                sdkImportStatus = "XIP selection cancelled."
+                return
+            }
+            guard url.pathExtension.lowercased() == "xip" else {
+                sdkImportStatus = "That is not an Xcode .xip file. Choose the original .xip downloaded from Apple."
+                return
+            }
             let hasScope = url.startAccessingSecurityScopedResource()
             sdkImportProgress = 0
             sdkImportStatus = "Opening \(url.lastPathComponent)…"
