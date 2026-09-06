@@ -100,7 +100,7 @@ struct IDEProjectToolsView: View {
                             }
                         }
                         TextField("New path for rename", text: $newPath)
-                            .textInputAutapitalization(.never)
+                            .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
                         Button("Rename / move") {
                             mutate { root in
