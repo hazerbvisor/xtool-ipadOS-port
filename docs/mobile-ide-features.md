@@ -1,0 +1,44 @@
+# XTool iPad IDE features
+
+Open the workspace tools menu beside the project status. The existing build action still creates an **unsigned IPA**; signing remains external.
+
+## Editing and projects
+
+- Swift syntax highlighting, keyword/project-identifier suggestions above the keyboard, and build diagnostic underlines. Completion is lexical, not SourceKit semantic completion; errors update after a build.
+- Find/replace (`Command-F`), project search (`Command-Shift-F`), save all (`Command-Shift-S`), and split editors (`Command-\\`). Drag the panel dividers to resize them.
+- Project tools create files/folders, rename or move entries, and move deleted entries to project trash with undo. Editors accept UTF-8 files up to 2 MB. Search is bounded to 500 matches.
+- The console Issues tab opens diagnostics at their source location. SDK diagnostics outside the project remain in the log.
+- Builds show target/link/package progress and reuse a module cache keyed by project, manifest, compiler and SDK identity. A first SwiftUI build can still be slow. Build history opens recovered logs and exports previous IPAs; its clear-cache action forces regeneration.
+
+## GitHub
+
+Open the visible **GitHub** toolbar button. The **Repositories** tab imports public repositories without an account. The **Account** tab guides you through creating a fine-grained token with repository Contents read access; paste it and select **Connect GitHub**. Your GitHub password will not work in the token field. OAuth device sign-in is under **Advanced** and requires the client ID of your own registered OAuth app with **Device Flow enabled**. No OAuth client secret belongs in the iPad app.
+
+Account state survives closing the panel. Saved credentials are checked when you reopen the app; errors distinguish rejected tokens, permission problems and rate limits. A Keychain save failure leaves an authenticated session connected with an explicit warning that its token was not saved. **Continue with public repositories** temporarily stops using the token without deleting the saved credential. [GitHub token instructions](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens).
+
+Enter `owner/repository` and a branch to import. Pull fetches an immutable commit snapshot and compares it with the previous snapshot. Local changes are preserved when the remote file is unchanged; conflicting local and remote edits stop the pull. Successful pulls retain backups in `.xtool/PullBackups`. Save/commit your work separately before major reorganizations.
+
+This is repository snapshot import/pull, not a full Git client: it does not push, merge branches, resolve submodules or materialize Git LFS pointers. Imports are limited to 2,000 regular files and 200 MB total (20 MB per blob); symlinks and submodules are rejected. Only supported Swift projects with the mobile build configuration can build on iPad. SwiftPM dependency graphs still need the existing host preparation workflow. File-to-directory conflicts may require a fresh import.
+
+## ChatGPT assistant
+
+The assistant uses the official **Codex app-server** protocol and ChatGPT device-code sign-in. It requires a separately running, reachable Codex host; the Codex runtime is not bundled into XTool. It starts its own conversation and does not import this ChatGPT chat.
+
+1. Install a current Codex CLI on a trusted host that supports `app-server --ws-auth` and ChatGPT device-code login. Use a dedicated account/container without unrelated repositories, credentials, MCP integrations or plugins. The host holds the ChatGPT session and can see the selected code and prompts.
+2. From this checkout run `bash scripts/run-mobile-codex-server.sh`. It creates a private connection-token file and starts on loopback port 4500. It disables shell and unified-exec tools. It does not configure public hosting.
+3. Put a trusted TLS WebSocket reverse proxy in front, forwarding the `Authorization` header. Restrict access to your devices. Use its `wss://` address on iPad. The app permits plain `ws://` only for localhost; a LAN address is not localhost.
+4. Open the visible **Assistant** toolbar button and its **Connection** tab. Step 1 connects the WSS endpoint using the contents of the host's connection-token file; pasted HTTPS proxy addresses are accepted and converted to WSS. Step 2 enables **Sign in with ChatGPT** after the server connects. Complete the official OpenAI device-code page. Account settings may need device-code authentication enabled. Sign out logs out the host's Codex session.
+5. Open project files, select which ones to share (200 KB total), and send your request. Expand each proposed change to review its before/after text, then choose **Apply reviewed changes**. Existing files must have been shared and must still match the supplied snapshot. New files are allowed inside the project; traversal and reserved metadata paths are rejected. Undo is available for the last applied batch while the panel remains open; backups persist in `.xtool/Edits`.
+
+The client requests a read-only, network-disabled execution sandbox and declines approval requests. Read-only does not mean the host cannot read its own files; use the dedicated host described above. Proposals are applied locally by XTool after review, not by host filesystem tools. Closing the assistant panel keeps its connection and login flow alive in the workspace. Use **Stop** to interrupt a response and **Disconnect server** in Connection settings to close the transport. iPadOS may suspend network work when XTool is backgrounded; foreground it to continue. The Chat tab is ready after both server connection and account sign-in succeed. WebSocket transport is experimental, so client/server versions must remain compatible. No paid API key is required by this integration; account/model eligibility is determined by Codex.
+
+References: [Codex app-server](https://learn.chatgpt.com/docs/app-server), [GitHub device flow](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/authorizing-oauth-apps#device-flow).
+
+## Validation
+
+`scripts/test-mobile-project.sh` runs portable Swift pipeline/workspace checks and Python build-tool tests. The host one-shot build runs these checks before building the app. UIKit/SwiftUI compilation and live GitHub/ChatGPT authentication must be checked on the host/device; they cannot be exercised by the Linux Python checks alone.
+
+
+## Connection UI validation
+
+The connection rework fixes a receive-loop deadlock: handling `account/login/completed` now schedules `account/read` without awaiting it inside the sole WebSocket reader. The reader can receive and resolve that request. Transport errors survive disconnection cleanup, endpoint/token whitespace is trimmed, and server tokens stay bound to their normalized endpoint. Host settings tests cover secure endpoint normalization, invalid/service-site addresses and GitHub error guidance. UI layout and live account flows still require device verification.
