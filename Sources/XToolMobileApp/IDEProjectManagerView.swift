@@ -113,8 +113,8 @@ struct IDEProjectManagerView: View {
         .confirmationDialog(
             "Delete project?",
             isPresented: $showingDeleteConfirmation,
-            presenting: pendingDelete,
-            titleVisibility: .visible
+            titleVisibility: .visible,
+            presenting: pendingDelete
         ) { item in
             Button("Delete \(item.name)", role: .destructive) { delete(item) }
             Button("Cancel", role: .cancel) { pendingDelete = nil }
