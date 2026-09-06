@@ -40,6 +40,8 @@ private struct MobileIDEView: View {
     @State private var showingTools = false
     @State private var showingGitHub = false
     @State private var showingAssistant = false
+    @StateObject private var assistantClient = IDECodexChat()
+    @StateObject private var githubClient = IDEGitHubClient()
     @State private var toolsPath = ""
     @State private var toolsTab = "Files"
     @State private var findVisible = false
@@ -243,6 +245,11 @@ private struct MobileIDEView: View {
             } label: { Image(systemName: "slider.horizontal.3").frame(width: 30, height: 30) }
             .disabled(isBuilding)
 
+            ViewThatFits(in: .horizontal) {
+                connectionActions.labelStyle(.titleAndIcon)
+                connectionActions.labelStyle(.iconOnly)
+            }
+
             buildStatusPill
 
             Button {
@@ -265,6 +272,15 @@ private struct MobileIDEView: View {
         .padding(.horizontal, 12)
         .frame(height: 52)
         .background(.ultraThinMaterial)
+    }
+
+    private var connectionActions: some View {
+        HStack(spacing: 8) {
+            Button { showingGitHub = true } label: { Label("GitHub", systemImage: "arrow.triangle.branch").frame(minHeight: 32) }
+                .help("GitHub repositories and account")
+            Button { showingAssistant = true } label: { Label("Assistant", systemImage: "bubble.left.and.bubble.right").frame(minHeight: 32) }
+                .help("Assistant chat and connection")
+        }.font(.caption.weight(.semibold)).buttonStyle(.bordered).disabled(isBuilding)
     }
 
     private var buildStatusPill: some View {
@@ -466,32 +482,38 @@ private struct MobileIDEView: View {
                 }
             }
         } else {
-            VStack(spacing: 12) {
-                Spacer()
-                Image(systemName: "hammer.circle")
-                    .font(.system(size: 55, weight: .thin))
-                    .foregroundStyle(.secondary)
-                Text("XTool Mobile")
-                    .font(.title2.weight(.semibold))
-                Text("Open a source file from the navigator or prepare the compiler probe.")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                HStack(spacing: 10) {
-                    Button("Open Project") {
-                        showingProjectImporter = true
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    Image(systemName: "hammer.fill").font(.system(size: 36)).foregroundStyle(.cyan)
+                        .padding(18).background(Color.cyan.opacity(0.1), in: RoundedRectangle(cornerRadius: 20))
+                    Text(project == nil ? "Your next app starts here" : "Ready when you are").font(.largeTitle.bold())
+                    Text(project == nil ? "Open a project, bring in code from GitHub, or start with a working example." : "Choose a source file in the navigator to start editing.")
+                        .foregroundStyle(.secondary)
+                    VStack(spacing: 12) {
+                        welcomeAction("Open project", detail: "Choose a folder from Files", symbol: "folder") { showingProjectImporter = true }
+                        welcomeAction("Import from GitHub", detail: "Public repositories work without signing in", symbol: "arrow.triangle.branch") { showingGitHub = true }
+                        welcomeAction("Create example app", detail: "A small Swift app ready to build", symbol: "plus.app") { createAppProject() }
+                        welcomeAction("Open assistant", detail: "Connect your Codex host and chat about your code", symbol: "bubble.left.and.bubble.right") { showingAssistant = true }
                     }
-                    .buttonStyle(.borderedProminent)
-                    Button("Open Swift Probe") {
-                        prepareHelloCompilerJob(openInEditor: true)
-                    }
-                    .buttonStyle(.bordered)
-                    .disabled(toolchain == nil)
-                }
-                Spacer()
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(Color(uiColor: .secondarySystemBackground))
+                    Button("Open compiler probe") { prepareHelloCompilerJob(openInEditor: true) }.font(.caption).disabled(toolchain == nil)
+                }.frame(maxWidth: 560, alignment: .leading).padding(32).frame(maxWidth: .infinity)
+            }.background(Color(uiColor: .systemGroupedBackground))
         }
+    }
+
+    private func welcomeAction(_ title: String, detail: String, symbol: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 14) {
+                Image(systemName: symbol).font(.title3).foregroundStyle(.cyan).frame(width: 28)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(title).font(.headline).foregroundStyle(.primary)
+                    Text(detail).font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.right").font(.caption).foregroundStyle(.secondary)
+            }.padding(16).frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14))
+        }.buttonStyle(.plain).disabled(isBuilding)
     }
 
     private var inspectorPanel: some View {
@@ -759,14 +781,14 @@ private struct MobileIDEView: View {
     private var githubSheet: some View {
         NavigationStack {
             IDEGitHubView(projectRoot: project?.root, prepareMutation: saveAllDocuments,
-                onOpen: { url in showingGitHub = false; importProject(.success([url])) })
+                onOpen: { url in showingGitHub = false; importProject(.success([url])) }, client: githubClient)
                 .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { showingGitHub = false } } }
         }
     }
     private var assistantSheet: some View {
         NavigationStack {
             IDEAssistantView(root: project?.root, files: projectChatFiles,
-                onApply: applyAssistantEdits, onUndo: undoAssistantEdits)
+                onApply: applyAssistantEdits, onUndo: undoAssistantEdits, chat: assistantClient)
                 .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { showingAssistant = false } } }
         }
     }
@@ -1001,6 +1023,7 @@ private struct MobileIDEView: View {
     }
 
     private func runCurrentBuild() {
+        guard !githubClient.busy else { appendLog("Wait for the GitHub action to finish before building."); return }
         consoleVisible = true
         selectedConsoleTab = .build
         if project != nil {
@@ -1028,7 +1051,7 @@ private struct MobileIDEView: View {
     }
 
     private func buildProjectIPA() {
-        guard !isBuilding, let project, let toolchain, let engine = compilerEngine else { return }
+        guard !isBuilding, !githubClient.busy, let project, let toolchain, let engine = compilerEngine else { return }
         do {
             // Save every edited tab. A failed save must stop the build.
             for index in documents.indices where documents[index].isDirty {
@@ -1193,7 +1216,7 @@ private struct MobileIDEView: View {
     }
 
     private func importProject(_ result: Result<[URL], Error>) {
-        guard !isBuilding else { appendLog("Wait for the current build before changing projects."); return }
+        guard !isBuilding, !assistantClient.busy else { appendLog("Wait for the build or assistant response before changing projects."); return }
         do {
             guard let url = try result.get().first else { return }
             let scoped = url.startAccessingSecurityScopedResource()
@@ -1205,6 +1228,7 @@ private struct MobileIDEView: View {
             }
             releaseSecurityScope(for: projectScopeURL)
             project = selected
+            assistantClient.load(root: url)
             projectScopeURL = scoped ? url : nil
             latestIPA = nil
             navigatorEntries = IDEWorkspaceScanner.scan(root: url, maxDepth: 15)

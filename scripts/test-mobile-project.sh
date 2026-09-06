@@ -13,6 +13,7 @@ cd "$ROOT"
   Sources/XToolMobileCore/MobileAppStarter.swift \
   Sources/XToolMobileCore/MobileProjectBuilder.swift \
   Sources/XToolMobileCore/MobileBuildLogRecovery.swift \
+  Sources/XToolMobileCore/MobileConnectionSettings.swift \
   Sources/XToolMobileCore/MobileModuleCache.swift \
   Sources/XToolMobileCore/MobileWorkspaceTools.swift \
   Sources/XToolMobileCore/MobileIPAPackager.swift \

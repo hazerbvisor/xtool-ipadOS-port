@@ -27,7 +27,10 @@ enum IDESecretStore {
 }
 
 @MainActor final class IDEGitHubClient: ObservableObject {
-    @Published var status = "Not connected"
+    @Published var status = "Public repositories are ready to import."
+    @Published var lastError = ""
+    @Published var credentialWarning = ""
+    private var restored = false
     @Published var busy = false
     @Published var userCode = ""
     @Published var verificationURL: URL?
@@ -52,12 +55,14 @@ enum IDESecretStore {
     }
     private func api(_ path: String) async throws -> [String: Any] {
         var request = URLRequest(url: URL(string: "https://api.github.com/" + path)!)
-        request.timeoutInterval = 60
+        request.timeoutInterval = 30
+        request.cachePolicy = .reloadIgnoringLocalCacheData
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         if !token.isEmpty { request.setValue("Bearer " + token, forHTTPHeaderField: "Authorization") }
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
-            throw MobileProjectBuildError.invalid("GitHub request failed (HTTP \((response as? HTTPURLResponse)?.statusCode ?? 0)). Check access and rate limits.")
+            let http = response as? HTTPURLResponse
+            throw MobileProjectBuildError.invalid(MobileConnectionSettings.githubFailure(status: http?.statusCode ?? 0, rateLimited: http?.value(forHTTPHeaderField: "X-RateLimit-Remaining") == "0"))
         }
         guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw MobileProjectBuildError.invalid("Unexpected GitHub response") }
         return object
@@ -76,25 +81,43 @@ enum IDESecretStore {
     }
     func useToken(_ value: String) async throws {
         let previous = token
-        token = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        let value = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else { throw MobileProjectBuildError.invalid("Paste a personal access token from GitHub. Your password will not work here.") }
+        token = value
         do {
             let user = try await api("user")
-            try IDESecretStore.save(token, account: "github")
+            try Task.checkCancellation()
+            do { try IDESecretStore.save(token, account: "github"); credentialWarning = "" }
+            catch { credentialWarning = "Connected for this session, but Keychain could not save the token. Re-enter it after restarting XTool." }
             account = user["login"] as? String ?? "GitHub"
             status = "Connected as \(account)"
         } catch { token = previous; throw error }
     }
-    func login(clientID: String) {
+    func restoreAccount() async {
+        guard !restored, !busy else { return }
+        restored = true
+        guard !token.isEmpty else { return }
+        await connectToken(token)
+    }
+    func connectToken(_ value: String) async {
+        guard !busy else { return }
+        busy = true; lastError = ""; status = "Checking GitHub account…"
+        defer { busy = false }
+        do { try await useToken(value) }
+        catch { lastError = String(describing: error); status = "Account connection failed" }
+    }
+    func login(clientID input: String) {
+        let clientID = input.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !busy else { return }
         guard !clientID.isEmpty else { status = "Enter an OAuth app client ID with Device Flow enabled, or use a personal access token."; return }
-        busy = true
+        busy = true; lastError = ""
         operation = Task {
             defer { busy = false; userCode = ""; verificationURL = nil }
             do {
                 let start = try await oauth("login/device/code", fields: ["client_id": clientID, "scope": "repo"])
                 guard let device = start["device_code"] as? String, let code = start["user_code"] as? String,
                       let uri = start["verification_uri"] as? String, let url = URL(string: uri), url.scheme == "https", url.host == "github.com" else {
-                    throw MobileProjectBuildError.invalid("Device Flow is unavailable for this OAuth app")
+                    throw MobileProjectBuildError.invalid("GitHub could not start device sign-in (\(start["error"] as? String ?? "invalid response")). Check your OAuth client ID and enable Device Flow, or use a personal access token.")
                 }
                 userCode = code; verificationURL = url; status = "Enter the code on GitHub, then return here."
                 var interval = max(5, start["interval"] as? Int ?? 5)
@@ -111,14 +134,16 @@ enum IDESecretStore {
                 }
                 status = "Sign-in code expired. Start again."
             } catch is CancellationError { status = "Cancelled" }
-            catch { status = String(describing: error) }
+            catch { lastError = String(describing: error); status = "GitHub action failed" }
         }
     }
     func cancel() { operation?.cancel() }
+    func usePublicAccess() { guard !busy else { return }; token = ""; account = ""; lastError = ""; status = "Public access for this session. Saved token remains in Keychain." }
     func logout() {
-        cancel()
+        guard !busy else { return }
+        cancel(); lastError = ""; restored = true
         do { try IDESecretStore.save("", account: "github"); token = ""; account = ""; status = "Signed out" }
-        catch { status = String(describing: error) }
+        catch { lastError = String(describing: error); status = "GitHub action failed" }
     }
 
     /// GitHub tree snapshots, pinned to a commit. Pull preserves local changes
@@ -126,6 +151,7 @@ enum IDESecretStore {
     func synchronize(repository input: String, branch requestedBranch: String, root: URL) async throws {
         var repository = input.trimmingCharacters(in: .whitespacesAndNewlines)
         if repository.hasPrefix("https://github.com/") { repository = String(repository.dropFirst(19)) }
+        while repository.hasSuffix("/") { repository.removeLast() }
         if repository.hasSuffix(".git") { repository.removeLast(4) }
         let parts = repository.split(separator: "/")
         guard parts.count == 2, parts.allSatisfy({ $0.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || "-_.".contains($0)) } }) else {
@@ -133,6 +159,7 @@ enum IDESecretStore {
         }
         let prefix = "repos/\(component(String(parts[0])))/\(component(String(parts[1])))"
         let repo = try await api(prefix)
+        let requestedBranch = requestedBranch.trimmingCharacters(in: .whitespacesAndNewlines)
         let branch = requestedBranch.isEmpty ? (repo["default_branch"] as? String ?? "main") : requestedBranch
         let commit = try await api(prefix + "/commits/" + component(branch))
         guard let sha = commit["sha"] as? String, let details = commit["commit"] as? [String: Any],
@@ -214,12 +241,12 @@ enum IDESecretStore {
 
     func perform(repository: String, branch: String, root: URL, completion: @escaping (URL) -> Void) {
         guard !busy else { return }
-        busy = true
+        busy = true; lastError = ""
         operation = Task {
             defer { busy = false }
             do { try await synchronize(repository: repository, branch: branch, root: root); completion(root) }
             catch is CancellationError { status = "Cancelled; existing project files were preserved." }
-            catch { status = String(describing: error) }
+            catch { lastError = String(describing: error); status = "GitHub action failed" }
         }
     }
 }
@@ -228,53 +255,97 @@ struct IDEGitHubView: View {
     let projectRoot: URL?
     let prepareMutation: () throws -> Void
     let onOpen: (URL) -> Void
-    @StateObject private var client = IDEGitHubClient()
+    @ObservedObject var client: IDEGitHubClient
     @AppStorage("githubOAuthClientID") private var clientID = ""
+    @State private var tab = "Repositories"
     @State private var repository = ""
     @State private var branch = ""
     @State private var personalToken = ""
     @State private var error = ""
+
     var body: some View {
-        Form {
-            Section("GitHub account") {
-                TextField("OAuth app client ID", text: $clientID).textInputAutocapitalization(.never).autocorrectionDisabled()
-                Button("Sign in to GitHub") { client.login(clientID: clientID) }.disabled(client.busy)
-                if !client.userCode.isEmpty {
-                    Text(client.userCode).font(.title.monospaced()).textSelection(.enabled)
-                    if let url = client.verificationURL { Link("Open GitHub to enter code", destination: url) }
+        VStack(spacing: 0) {
+            IDEConnectionBanner(title: "GitHub", subtitle: client.account.isEmpty ? "Import public projects without signing in" : "Signed in as @" + client.account,
+                symbol: "point.3.connected.trianglepath.dotted", connected: !client.account.isEmpty)
+            Picker("GitHub", selection: $tab) {
+                Text("Repositories").tag("Repositories")
+                Text("Account").tag("Account")
+            }.pickerStyle(.segmented).padding(.horizontal).padding(.bottom, 12)
+            Form {
+                if tab == "Repositories" { repositorySection } else { accountSection }
+                Section("Activity") {
+                    if client.busy { ProgressView(client.status); Button("Cancel") { client.cancel() } }
+                    else { Text(client.status).foregroundStyle(.secondary).textSelection(.enabled) }
+                    if !client.credentialWarning.isEmpty { Text(client.credentialWarning).font(.caption).foregroundStyle(.orange) }
+                    if !client.lastError.isEmpty { Label(client.lastError, systemImage: "exclamationmark.triangle").foregroundStyle(.orange).textSelection(.enabled) }
+                    if !error.isEmpty { Text(error).foregroundStyle(.orange).textSelection(.enabled) }
                 }
-                DisclosureGroup("Use a personal access token") {
-                    SecureField("Token with repository Contents read access", text: $personalToken)
-                    Button("Connect token") { Task { do { try await client.useToken(personalToken); personalToken = "" } catch { self.error = String(describing: error) } } }.disabled(client.busy)
-                }
+            }.scrollContentBackground(.hidden)
+        }.background(Color(uiColor: .systemGroupedBackground)).navigationTitle("GitHub")
+            .task { await client.restoreAccount() }
+    }
+    @ViewBuilder private var repositorySection: some View {
+        Section {
+            Label("Bring a project to your iPad", systemImage: "arrow.down.doc").font(.headline)
+            TextField("Repository URL or owner/repository", text: $repository)
+                .textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL)
+            TextField("Branch · leave blank for default", text: $branch).textInputAutocapitalization(.never).autocorrectionDisabled()
+            Button { importRepository() } label: { Label("Import repository", systemImage: "arrow.down.circle.fill").frame(maxWidth: .infinity) }
+                .buttonStyle(.borderedProminent).disabled(client.busy || repository.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            if client.account.isEmpty {
+                Button("Connect an account for private repositories") { tab = "Account" }
+            }
+        } footer: { Text("Source files are downloaded to Projects. Buildable projects need xtool-mobile.json; dependencies may need host preparation.") }
+        if let root = projectRoot, let checkout = IDEGitHubClient.checkout(in: root) {
+            Section("Current checkout") {
+                Label(checkout.repository, systemImage: "folder").font(.headline)
+                Text("\(checkout.branch) · \(checkout.commit.prefix(8))").font(.caption.monospaced()).foregroundStyle(.secondary)
+                Button("Pull latest changes") {
+                    do { error = ""; try prepareMutation(); client.perform(repository: checkout.repository, branch: checkout.branch, root: root, completion: onOpen) }
+                    catch { self.error = String(describing: error) }
+                }.disabled(client.busy)
+                Text("Conflicting local edits stop the pull so you can resolve them.").font(.caption)
+            }
+        }
+    }
+    @ViewBuilder private var accountSection: some View {
+        if !client.account.isEmpty {
+            Section("Connected account") {
+                Label("@" + client.account, systemImage: "checkmark.seal.fill").foregroundStyle(.green)
                 Button("Sign out", role: .destructive) { client.logout() }.disabled(client.busy)
-                Text("Public repositories can be imported without signing in. OAuth Device Flow must be enabled on your GitHub OAuth app.").font(.caption)
             }
-            Section("Repository") {
-                TextField("owner/repository", text: $repository).textInputAutocapitalization(.never).autocorrectionDisabled()
-                TextField("Branch (blank uses default)", text: $branch).textInputAutocapitalization(.never).autocorrectionDisabled()
-                Button("Import repository") {
-                    do {
-                        try prepareMutation()
-                        let root = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-                            .appendingPathComponent("Projects/GitHub-\(UUID().uuidString.prefix(8))")
-                        client.perform(repository: repository, branch: branch, root: root, completion: onOpen)
-                    } catch { self.error = String(describing: error) }
-                }.disabled(client.busy || repository.isEmpty)
-                if let root = projectRoot, let checkout = IDEGitHubClient.checkout(in: root) {
-                    Text("\(checkout.repository) · \(checkout.branch) · \(checkout.commit.prefix(8))").font(.caption)
-                    Button("Pull updates into current project") {
-                        do { try prepareMutation(); client.perform(repository: checkout.repository, branch: checkout.branch, root: root, completion: onOpen) }
-                        catch { self.error = String(describing: error) }
-                    }.disabled(client.busy)
-                }
-                Text("Imports a source snapshot. Pull stops on conflicting local edits. SwiftPM dependencies still need host preparation for on-device builds.").font(.caption)
+        }
+        Section {
+            Label("Connect with a personal access token", systemImage: "key.fill").font(.headline)
+            Text("1. Create a fine-grained token on GitHub. Select your repositories and set Contents to Read-only.")
+            Link("Create token on GitHub", destination: URL(string: "https://github.com/settings/personal-access-tokens/new")!)
+            Text("2. Copy the token, return here and paste it below. Use a token, not your GitHub password.")
+            SecureField("Paste GitHub token", text: $personalToken).textInputAutocapitalization(.never).autocorrectionDisabled()
+            Button("Connect GitHub") {
+                Task { await client.connectToken(personalToken); if client.lastError.isEmpty { personalToken = ""; tab = "Repositories" } }
+            }.buttonStyle(.borderedProminent).disabled(client.busy || personalToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        } footer: { Text("Saved on this iPad in Keychain. Private organization repositories may require organization approval.") }
+        Section("Other options") {
+            Button("Continue with public repositories") { client.usePublicAccess(); tab = "Repositories" }.disabled(client.busy)
+            DisclosureGroup("Advanced: OAuth device sign-in") {
+                Text("Requires your own registered GitHub OAuth app with Device Flow enabled. A GitHub username is not a client ID.").font(.caption)
+                Link("Register an OAuth app", destination: URL(string: "https://github.com/settings/developers")!)
+                TextField("OAuth client ID", text: $clientID).textInputAutocapitalization(.never).autocorrectionDisabled()
+                Button("Get sign-in code") { client.login(clientID: clientID) }.disabled(client.busy || clientID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
-            Section {
-                if client.busy { ProgressView(); Button("Cancel") { client.cancel() } }
-                Text(client.status).textSelection(.enabled)
-                if !error.isEmpty { Text(error).foregroundStyle(.red) }
+            if !client.userCode.isEmpty {
+                Text(client.userCode).font(.title.monospaced()).textSelection(.enabled)
+                if let url = client.verificationURL { Link("Open GitHub to enter this code", destination: url) }
+                Text("Return here after approving. You can close this panel while sign-in finishes.").font(.caption)
             }
-        }.navigationTitle("GitHub")
+        }
+    }
+    private func importRepository() {
+        do {
+            error = ""; try prepareMutation()
+            let root = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+                .appendingPathComponent("Projects/GitHub-\(UUID().uuidString.prefix(8))", isDirectory: true)
+            client.perform(repository: repository, branch: branch, root: root, completion: onOpen)
+        } catch { self.error = String(describing: error) }
     }
 }
