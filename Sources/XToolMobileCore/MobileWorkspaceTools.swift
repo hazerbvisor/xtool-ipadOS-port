@@ -21,8 +21,8 @@ public struct MobileSourceDiagnostic: Identifiable, Hashable, Sendable {
 }
 
 public enum MobileWorkspaceTools {
-    /// Validates both lexical traversal and existing symlink parents, including
-    /// for files which have not been created yet.
+    /// Rejects traversal and symlink components, including dangling links and
+    /// symlink parents of files which have not been created yet.
     public static func destination(_ path: String, in root: URL) throws -> URL {
         let parts = path.split(separator: "/", omittingEmptySubsequences: false)
         guard !path.isEmpty, !path.contains("\\"), !path.contains("\0"),
@@ -31,7 +31,18 @@ public enum MobileWorkspaceTools {
             throw MobileProjectBuildError.invalid("Invalid project path: \(path)")
         }
         let base = root.resolvingSymlinksInPath().standardizedFileURL
-        let target = base.appendingPathComponent(path).resolvingSymlinksInPath().standardizedFileURL
+        // Resolving an entire nonexistent destination is not sufficient on all
+        // Foundation implementations. Inspect each component with readlink
+        // semantics before allowing creation beneath it. The editor does not
+        // support editing through project symlinks, even internal ones.
+        var target = base
+        for part in parts {
+            target.appendPathComponent(String(part))
+            if (try? FileManager.default.destinationOfSymbolicLink(atPath: target.path)) != nil {
+                throw MobileProjectBuildError.invalid("Symlink paths are not editable: \(path)")
+            }
+        }
+        target = target.standardizedFileURL
         guard target.path.hasPrefix(base.path + "/") else {
             throw MobileProjectBuildError.invalid("Path leaves the project: \(path)")
         }
