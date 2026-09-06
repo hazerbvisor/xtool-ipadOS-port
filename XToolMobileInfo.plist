@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>LSSupportsOpeningDocumentsInPlace</key>
+    <true/>
+    <key>UTImportedTypeDeclarations</key>
+    <array>
+        <dict>
+            <key>UTTypeIdentifier</key>
+            <string>com.apple.xip-archive</string>
+            <key>UTTypeDescription</key>
+            <string>XIP Archive</string>
+            <key>UTTypeConformsTo</key>
+            <array>
+                <string>public.archive</string>
+                <string>public.data</string>
+            </array>
+            <key>UTTypeTagSpecification</key>
+            <dict>
+                <key>public.filename-extension</key>
+                <array>
+                    <string>xip</string>
+                </array>
+            </dict>
+        </dict>
+    </array>
+</dict>
+</plist>
