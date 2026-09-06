@@ -9,10 +9,14 @@ private struct IDESavedProject: Identifiable, Hashable {
     var id: String { root.standardizedFileURL.path }
     var name: String { root.lastPathComponent }
     var hasMobileManifest: Bool {
-        FileManager.default.fileExists(atPath: root.appendingPathComponent(MobileAppManifest.filename).path)
+        FileManager.default.fileExists(
+            atPath: root.appendingPathComponent(MobileAppManifest.filename).path
+        )
     }
     var hasPackageManifest: Bool {
-        FileManager.default.fileExists(atPath: root.appendingPathComponent("Package.swift").path)
+        FileManager.default.fileExists(
+            atPath: root.appendingPathComponent("Package.swift").path
+        )
     }
 }
 
@@ -36,62 +40,95 @@ struct IDEProjectManagerView: View {
     }
 
     private var filteredProjects: [IDESavedProject] {
-        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return projects }
+        let needle = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !needle.isEmpty else { return projects }
         return projects.filter { item in
-            if item.name.localizedCaseInsensitiveContains(trimmed) { return true }
+            if item.name.localizedCaseInsensitiveContains(needle) { return true }
             if let checkout = item.checkout {
-                return checkout.repository.localizedCaseInsensitiveContains(trimmed)
-                    || checkout.branch.localizedCaseInsensitiveContains(trimmed)
+                return checkout.repository.localizedCaseInsensitiveContains(needle)
+                    || checkout.branch.localizedCaseInsensitiveContains(needle)
             }
             return false
         }
     }
 
     var body: some View {
-        Section {
-            HStack(spacing: 8) {
-                Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                TextField("Search saved projects", text: $query)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                Button {
-                    refresh()
-                } label: {
-                    Image(systemName: "arrow.clockwise")
-                }
-                .buttonStyle(.borderless)
-            }
-        } header: {
-            Text("Saved projects")
-        } footer: {
-            Text("Projects imported from GitHub or created in XTool stay in Documents/Projects until you delete them.")
-        }
-
-        if filteredProjects.isEmpty {
+        Group {
             Section {
-                ContentUnavailableView(
-                    "No Saved Projects",
-                    systemImage: "folder",
-                    description: Text(query.isEmpty ? "Import or create a project and it will appear here." : "No projects match your search.")
-                )
-                .frame(maxWidth: .infinity)
+                HStack(spacing: 8) {
+                    Image(systemName: "magnifyingglass")
+                        .foregroundStyle(.secondary)
+                    TextField("Search saved projects", text: $query)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    Button {
+                        refresh()
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
+                    }
+                    .buttonStyle(.borderless)
+                }
+            } header: {
+                Text("Saved projects")
+            } footer: {
+                Text("GitHub imports and projects created in XTool stay in Documents/Projects until you delete them.")
             }
-        } else {
-            Section("Projects") {
-                ForEach(filteredProjects) { item in
-                    projectRow(item)
+
+            if filteredProjects.isEmpty {
+                Section {
+                    VStack(spacing: 8) {
+                        Image(systemName: "folder")
+                            .font(.title2)
+                            .foregroundStyle(.secondary)
+                        Text("No Saved Projects")
+                            .font(.headline)
+                        Text(query.isEmpty
+                             ? "Import or create a project and it will appear here."
+                             : "No projects match your search.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 18)
+                }
+            } else {
+                Section("Projects") {
+                    ForEach(filteredProjects) { item in
+                        projectRow(item)
+                    }
+                }
+            }
+
+            if !message.isEmpty {
+                Section("Project Manager") {
+                    Text(message)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
                 }
             }
         }
-
-        if !message.isEmpty {
-            Section("Project Manager") {
-                Text(message)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .textSelection(.enabled)
+        .onAppear { refresh() }
+        .confirmationDialog(
+            "Delete project?",
+            isPresented: $showingDeleteConfirmation,
+            presenting: pendingDelete,
+            titleVisibility: .visible
+        ) { item in
+            Button("Delete \(item.name)", role: .destructive) { delete(item) }
+            Button("Cancel", role: .cancel) { pendingDelete = nil }
+        } message: { item in
+            Text("This permanently removes \(item.name) and its source files from XTool. Build history is stored separately.")
+        }
+        .alert("Rename project", isPresented: $showingRenamePrompt) {
+            TextField("Project name", text: $renameText)
+            Button("Rename") {
+                if let item = pendingRename { rename(item) }
             }
+            Button("Cancel", role: .cancel) { pendingRename = nil }
+        } message: {
+            Text("The currently open project cannot be renamed. Switch projects first.")
         }
     }
 
@@ -99,16 +136,19 @@ struct IDEProjectManagerView: View {
     private func projectRow(_ item: IDESavedProject) -> some View {
         let current = isCurrent(item)
         VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .firstTextBaseline) {
-                Image(systemName: current ? "folder.fill.badge.checkmark" : "folder.fill")
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Image(systemName: current ? "folder.fill" : "folder")
                     .foregroundStyle(current ? Color.accentColor : Color.secondary)
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: 6) {
-                        Text(item.name).font(.headline).lineLimit(1)
+                        Text(item.name)
+                            .font(.headline)
+                            .lineLimit(1)
                         if current {
                             Text("OPEN")
                                 .font(.system(size: 9, weight: .bold))
-                                .padding(.horizontal, 5).padding(.vertical, 2)
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 2)
                                 .background(Color.accentColor.opacity(0.18), in: Capsule())
                         }
                     }
@@ -118,7 +158,9 @@ struct IDEProjectManagerView: View {
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
                     } else {
-                        Text(item.hasMobileManifest ? "XTool mobile project" : (item.hasPackageManifest ? "Swift package" : "Project folder"))
+                        Text(item.hasMobileManifest
+                             ? "XTool mobile project"
+                             : (item.hasPackageManifest ? "Swift package" : "Project folder"))
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -179,29 +221,6 @@ struct IDEProjectManagerView: View {
             }
         }
         .padding(.vertical, 4)
-        .confirmationDialog(
-            "Delete project?",
-            isPresented: Binding(
-                get: { showingDeleteConfirmation && pendingDelete?.id == item.id },
-                set: { if !$0 { showingDeleteConfirmation = false } }
-            ),
-            titleVisibility: .visible
-        ) {
-            Button("Delete \(item.name)", role: .destructive) { delete(item) }
-            Button("Cancel", role: .cancel) { pendingDelete = nil }
-        } message: {
-            Text("This permanently removes the saved project folder and its source files from XTool. Build history is kept separately.")
-        }
-        .alert("Rename project", isPresented: Binding(
-            get: { showingRenamePrompt && pendingRename?.id == item.id },
-            set: { if !$0 { showingRenamePrompt = false } }
-        )) {
-            TextField("Project name", text: $renameText)
-            Button("Rename") { rename(item) }
-            Button("Cancel", role: .cancel) { pendingRename = nil }
-        } message: {
-            Text("The current open project cannot be renamed. Close or switch projects first.")
-        }
     }
 
     private func isCurrent(_ item: IDESavedProject) -> Bool {
@@ -240,7 +259,10 @@ struct IDEProjectManagerView: View {
     }
 
     private func rename(_ item: IDESavedProject) {
-        defer { pendingRename = nil; showingRenamePrompt = false }
+        defer {
+            pendingRename = nil
+            showingRenamePrompt = false
+        }
         guard !isCurrent(item) else {
             message = "Switch away from this project before renaming it."
             return
@@ -265,15 +287,18 @@ struct IDEProjectManagerView: View {
     }
 
     private func delete(_ item: IDESavedProject) {
-        defer { pendingDelete = nil; showingDeleteConfirmation = false }
+        defer {
+            pendingDelete = nil
+            showingDeleteConfirmation = false
+        }
         guard !isCurrent(item) else {
             message = "Switch away from this project before deleting it."
             return
         }
         do {
-            let root = projectsRoot.resolvingSymlinksInPath().standardizedFileURL.path
-            let target = item.root.resolvingSymlinksInPath().standardizedFileURL.path
-            guard target.hasPrefix(root + "/") else {
+            let rootPath = projectsRoot.resolvingSymlinksInPath().standardizedFileURL.path
+            let targetPath = item.root.resolvingSymlinksInPath().standardizedFileURL.path
+            guard targetPath.hasPrefix(rootPath + "/") else {
                 throw MobileProjectBuildError.invalid("Refusing to delete a folder outside Documents/Projects")
             }
             try FileManager.default.removeItem(at: item.root)
@@ -288,14 +313,18 @@ struct IDEProjectManagerView: View {
     private func refresh() {
         let fm = FileManager.default
         try? fm.createDirectory(at: projectsRoot, withIntermediateDirectories: true)
-        if let currentRoot, currentRoot.standardizedFileURL.path.hasPrefix(projectsRoot.standardizedFileURL.path + "/") {
+
+        if let currentRoot,
+           currentRoot.standardizedFileURL.path.hasPrefix(projectsRoot.standardizedFileURL.path + "/") {
             markOpened(currentRoot)
         }
+
         let urls = (try? fm.contentsOfDirectory(
             at: projectsRoot,
             includingPropertiesForKeys: [.isDirectoryKey, .contentModificationDateKey],
             options: [.skipsHiddenFiles]
         )) ?? []
+
         projects = urls.compactMap { url in
             let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .contentModificationDateKey])
             guard values?.isDirectory == true else { return nil }
@@ -306,21 +335,26 @@ struct IDEProjectManagerView: View {
                 modified: values?.contentModificationDate ?? .distantPast,
                 checkout: IDEGitHubClient.checkout(in: url)
             )
-        }.sorted { lhs, rhs in
-            let left = lastOpened(lhs) ?? lhs.modified
-            let right = lastOpened(rhs) ?? rhs.modified
-            return left > right
+        }
+        .sorted { lhs, rhs in
+            (lastOpened(lhs) ?? lhs.modified) > (lastOpened(rhs) ?? rhs.modified)
         }
     }
 
     private func isValidProjectName(_ value: String) -> Bool {
-        !value.isEmpty && value != "." && value != ".."
-            && !value.contains("/") && !value.contains("\\") && !value.contains(":")
+        !value.isEmpty
+            && value != "."
+            && value != ".."
+            && !value.contains("/")
+            && !value.contains("\\")
+            && !value.contains(":")
     }
 
     private func openedMap() -> [String: Double] {
         guard let data = lastOpenedStorage.data(using: .utf8),
-              let object = try? JSONDecoder().decode([String: Double].self, from: data) else { return [:] }
+              let object = try? JSONDecoder().decode([String: Double].self, from: data) else {
+            return [:]
+        }
         return object
     }
 
@@ -331,7 +365,8 @@ struct IDEProjectManagerView: View {
     }
 
     private func lastOpened(_ item: IDESavedProject) -> Date? {
-        openedMap()[item.root.standardizedFileURL.path].map(Date.init(timeIntervalSince1970:))
+        openedMap()[item.root.standardizedFileURL.path]
+            .map(Date.init(timeIntervalSince1970:))
     }
 
     private func markOpened(_ url: URL) {
