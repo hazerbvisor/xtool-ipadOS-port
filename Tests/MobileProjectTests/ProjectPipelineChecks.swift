@@ -198,6 +198,15 @@ private func workspaceChecks(in root: URL) throws {
         do { try action() } catch { return }
         throw NSError(domain: "TEST FAILED: " + message, code: 1)
     }
+    let endpoint = try MobileConnectionSettings.codexEndpoint("  https://host.example:8443/codex  ")
+    try require(endpoint.scheme == "wss" && endpoint.port == 8443 && endpoint.path == "/codex", "pasted HTTPS proxy address normalizes to secure WebSocket")
+    for address in ["", "https://chatgpt.com", "ws://192.168.1.5:4500", "wss://user:password@host.example", "wss://host.example?token=secret"] {
+        try rejects("invalid connection address accepted") { _ = try MobileConnectionSettings.codexEndpoint(address) }
+    }
+    let loopback = try MobileConnectionSettings.codexEndpoint("ws://127.0.0.1:4500")
+    try require(loopback.scheme == "ws", "localhost development transport remains supported")
+    try require(MobileConnectionSettings.githubFailure(status: 401).contains("token"), "credential rejection has actionable guidance")
+    try require(MobileConnectionSettings.githubFailure(status: 403, rateLimited: true).contains("limit"), "rate limit differs from permission failure")
     let file = try MobileWorkspaceTools.create("Sources/a.swift", directory: false, in: root)
     try "before".write(to: file, atomically: true, encoding: .utf8)
     for path in ["../escape", "/escape", "Sources/../../escape", ".xtool/chat.json", "a//b"] {
