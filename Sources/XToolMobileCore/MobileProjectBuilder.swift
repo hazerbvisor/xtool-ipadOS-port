@@ -191,6 +191,7 @@ public enum MobileProjectBuilder {
             var link = ["-arch", "arm64", "-platform_version", "ios", manifest.deploymentTarget, sdk.targetSDKVersion ?? manifest.deploymentTarget,
                         "-syslibroot", sdk.sdkURL.path, "-e", "_main", "-no_adhoc_codesign",
                         "-rpath", "@executable_path/Frameworks", "-rpath", "/usr/lib/swift"]
+            link += (manifest.linkerFlags ?? []).map(expand)
             let libraryPaths = [
                 sdk.sdkURL.appendingPathComponent("usr/lib"),
                 sdk.sdkURL.appendingPathComponent("usr/lib/system"),
@@ -319,4 +320,3 @@ public enum MobileProjectBuilder {
                 + searched.joined(separator: "\n"))
     }
 }
-
