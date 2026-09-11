@@ -14,7 +14,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD_DIR="$ROOT/.build/$TRIPLE/$CONFIGURATION"
 EXECUTABLE="$BUILD_DIR/XToolMobileApp"
 RUNTIME="$ROOT/.build/XToolMobileRuntime"
-RUNTIME_ARCHIVE="$ROOT/.build/XToolMobileRuntime.tar"
+RUNTIME_ARCHIVE="${RUNTIME_ARCHIVE:-$ROOT/.build/XToolMobileRuntime.tar}"
 COMPILER_ENGINE_DYLIB="${COMPILER_ENGINE_DYLIB:-$ROOT/.build/mobile-compiler-engine/package/libXToolCompilerEngine.dylib}"
 STAGE="$ROOT/.build/mobile-package"
 PAYLOAD="$STAGE/Payload"
@@ -52,6 +52,7 @@ fi
 if [[ "$BUNDLE_RUNTIME_ARCHIVE" == "1" ]]; then
   if [[ -f "$RUNTIME_ARCHIVE" ]]; then
     echo "Bundling Darwin runtime as signer-safe MobileRuntime.tar..."
+    echo "Runtime source: $RUNTIME_ARCHIVE"
     cp "$RUNTIME_ARCHIVE" "$APP/MobileRuntime.tar"
   else
     echo "warning: $RUNTIME_ARCHIVE is missing" >&2
@@ -147,5 +148,6 @@ Signing: intentionally unsigned; no provisioning profile included.
 Compiler engine bundled: $ENGINE_BUNDLED
 Compiler engine path: $COMPILER_ENGINE_DYLIB
 Bundled runtime archive: $BUNDLE_RUNTIME_ARCHIVE
+Runtime archive source: $RUNTIME_ARCHIVE
 Expanded runtime: $EMBED_RUNTIME_EXPANDED
 EOF
