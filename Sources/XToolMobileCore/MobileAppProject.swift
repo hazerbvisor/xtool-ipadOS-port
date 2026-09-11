@@ -20,6 +20,7 @@ public struct MobileAppManifest: Codable, Sendable {
     public var buildVersion: String?
     public var reuseCompilerEngine: Bool?
     public var reuseBundledRuntime: Bool?
+    public var extensions: [AppExtension]?
 
     public struct Target: Codable, Sendable {
         public var name: String
@@ -37,6 +38,25 @@ public struct MobileAppManifest: Codable, Sendable {
         public var destination: String
     }
 
+    /// One embedded Foundation-style app extension (.appex).
+    ///
+    /// XTool Mobile links these with Foundation's `_NSExtensionMain`, then embeds
+    /// the resulting bundle in `PlugIns/<name>.appex`. Signing remains a separate
+    /// step because the mobile builder intentionally emits unsigned IPAs.
+    public struct AppExtension: Codable, Sendable {
+        public var name: String
+        public var bundleIdentifier: String
+        public var executableTarget: String
+        public var infoPlist: String
+        public var resources: [Resource]?
+        public var frameworks: [String]?
+        public var libraries: [String]?
+        public var linkFiles: [String]?
+        public var librarySearchPaths: [String]?
+        public var moduleSearchPaths: [String]?
+        public var linkerFlags: [String]?
+    }
+
     public static let filename = "xtool-mobile.json"
 
     public static func load(from root: URL) throws -> Self {
@@ -47,24 +67,51 @@ public struct MobileAppManifest: Codable, Sendable {
             )
         }
         let manifest = try JSONDecoder().decode(Self.self, from: Data(contentsOf: url))
-        _ = try manifest.orderedTargets()
+        _ = try manifest.allOrderedTargets()
         return manifest
     }
 
-    /// Dependency closure for the app, with missing dependencies and cycles rejected.
+    /// Dependency closure for the host app, with missing dependencies and cycles rejected.
     public func orderedTargets() throws -> [Target] {
-        guard schemaVersion == 1 else { throw MobileProjectBuildError.invalid("Unsupported project schema \(schemaVersion)") }
-        try Self.validateName(name)
-        guard bundleIdentifier.split(separator: ".").count >= 2,
-              bundleIdentifier.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "." || $0 == "-") }),
-              !bundleIdentifier.contains(".."), !bundleIdentifier.hasPrefix("."), !bundleIdentifier.hasSuffix(".") else {
-            throw MobileProjectBuildError.invalid("Invalid bundle identifier")
+        let byName = try validatedTargetTable()
+        return try orderedTargets(root: executableTarget, byName: byName)
+    }
+
+    /// Dependency closure for a specific executable product root.
+    public func orderedTargets(for root: String) throws -> [Target] {
+        let byName = try validatedTargetTable()
+        return try orderedTargets(root: root, byName: byName)
+    }
+
+    /// All targets required by the host app and every embedded extension, in a
+    /// stable dependency-first order with shared targets compiled only once.
+    public func allOrderedTargets() throws -> [Target] {
+        let byName = try validatedTargetTable()
+        let roots = [executableTarget] + (extensions ?? []).map(\.executableTarget)
+        var seen: Set<String> = []
+        var result: [Target] = []
+        for root in roots {
+            for target in try orderedTargets(root: root, byName: byName) where seen.insert(target.name).inserted {
+                result.append(target)
+            }
         }
+        return result
+    }
+
+    private func validatedTargetTable() throws -> [String: Target] {
+        guard schemaVersion == 1 else {
+            throw MobileProjectBuildError.invalid("Unsupported project schema \(schemaVersion)")
+        }
+        try Self.validateName(name)
+        try Self.validateBundleIdentifier(bundleIdentifier)
+
         let versionParts = deploymentTarget.split(separator: ".", omittingEmptySubsequences: false)
-        guard (2...3).contains(versionParts.count), versionParts.allSatisfy({ UInt($0) != nil }),
+        guard (2...3).contains(versionParts.count),
+              versionParts.allSatisfy({ UInt($0) != nil }),
               (UInt(versionParts[0]) ?? 0) >= 16 else {
             throw MobileProjectBuildError.invalid("Deployment target must be iOS 16.0 or newer")
         }
+
         var byName: [String: Target] = [:]
         for target in targets {
             try Self.validateName(target.name)
@@ -72,19 +119,51 @@ public struct MobileAppManifest: Codable, Sendable {
                 throw MobileProjectBuildError.invalid("Duplicate target: \(target.name)")
             }
         }
+        guard byName[executableTarget] != nil else {
+            throw MobileProjectBuildError.invalid("Missing executable target: \(executableTarget)")
+        }
+
+        var productNames: Set<String> = [name]
+        var bundleIDs: Set<String> = [bundleIdentifier.lowercased()]
+        for appExtension in extensions ?? [] {
+            try Self.validateName(appExtension.name)
+            try Self.validateBundleIdentifier(appExtension.bundleIdentifier)
+            guard productNames.insert(appExtension.name).inserted else {
+                throw MobileProjectBuildError.invalid("Duplicate product name: \(appExtension.name)")
+            }
+            guard bundleIDs.insert(appExtension.bundleIdentifier.lowercased()).inserted else {
+                throw MobileProjectBuildError.invalid("Duplicate bundle identifier: \(appExtension.bundleIdentifier)")
+            }
+            guard byName[appExtension.executableTarget] != nil else {
+                throw MobileProjectBuildError.invalid(
+                    "Missing extension executable target \(appExtension.executableTarget) for \(appExtension.name)"
+                )
+            }
+            guard !appExtension.infoPlist.isEmpty else {
+                throw MobileProjectBuildError.invalid("Extension \(appExtension.name) needs infoPlist")
+            }
+        }
+        return byName
+    }
+
+    private func orderedTargets(root: String, byName: [String: Target]) throws -> [Target] {
         var active: Set<String> = []
         var visited: Set<String> = []
         var result: [Target] = []
-        func visit(_ name: String) throws {
-            if visited.contains(name) { return }
-            guard let target = byName[name] else { throw MobileProjectBuildError.invalid("Missing target dependency: \(name)") }
-            guard active.insert(name).inserted else { throw MobileProjectBuildError.invalid("Dependency cycle at \(name)") }
+        func visit(_ targetName: String) throws {
+            if visited.contains(targetName) { return }
+            guard let target = byName[targetName] else {
+                throw MobileProjectBuildError.invalid("Missing target dependency: \(targetName)")
+            }
+            guard active.insert(targetName).inserted else {
+                throw MobileProjectBuildError.invalid("Dependency cycle at \(targetName)")
+            }
             for dependency in target.dependencies ?? [] { try visit(dependency) }
-            active.remove(name)
-            visited.insert(name)
+            active.remove(targetName)
+            visited.insert(targetName)
             result.append(target)
         }
-        try visit(executableTarget)
+        try visit(root)
         return result
     }
 
@@ -92,6 +171,16 @@ public struct MobileAppManifest: Codable, Sendable {
         guard let first = name.first, first.isASCII, first.isLetter || first == "_",
               name.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "_") }) else {
             throw MobileProjectBuildError.invalid("Use letters, digits and underscores for product and module names: \(name)")
+        }
+    }
+
+    static func validateBundleIdentifier(_ bundleIdentifier: String) throws {
+        guard bundleIdentifier.split(separator: ".").count >= 2,
+              bundleIdentifier.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "." || $0 == "-") }),
+              !bundleIdentifier.contains(".."),
+              !bundleIdentifier.hasPrefix("."),
+              !bundleIdentifier.hasSuffix(".") else {
+            throw MobileProjectBuildError.invalid("Invalid bundle identifier: \(bundleIdentifier)")
         }
     }
 }
@@ -125,13 +214,19 @@ enum MobileProjectPaths {
         let url = try input(path, root: root)
         let values = try url.resourceValues(forKeys: [.isDirectoryKey])
         if values.isDirectory != true { return [url] }
-        guard let walker = FileManager.default.enumerator(at: url, includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey], options: [.skipsHiddenFiles]) else {
+        guard let walker = FileManager.default.enumerator(
+            at: url,
+            includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey],
+            options: [.skipsHiddenFiles]
+        ) else {
             throw MobileProjectBuildError.invalid("Cannot read directory: \(path)")
         }
         var files: [URL] = []
         for case let file as URL in walker {
             let info = try file.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
-            guard info.isSymbolicLink != true else { throw MobileProjectBuildError.invalid("Resource/source symlinks must be materialized: \(file.path)") }
+            guard info.isSymbolicLink != true else {
+                throw MobileProjectBuildError.invalid("Resource/source symlinks must be materialized: \(file.path)")
+            }
             if info.isRegularFile == true { files.append(file) }
         }
         return files.sorted { $0.path < $1.path }
