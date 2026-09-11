@@ -187,6 +187,7 @@ SWIFT_FORCE_MODULE_LOADING=prefer-serialized \
   -sdk "$IOS_SDK" \
   -resource-dir "$BOUND_SWIFT_RESOURCES" \
   -I "$BOUND_IPHONEOS_SWIFT" \
+  -I "$BOUND_SWIFT_RESOURCES/shims" \
   -I "$OUT_DEVELOPER/Platforms/iPhoneOS.platform/Developer/usr/lib" \
   -module-cache-path "$HOST_MODULE_CACHE" \
   -prebuilt-module-cache-path "$XTOOL_PREBUILT_ROOT" \
@@ -248,6 +249,7 @@ if ! SWIFT_FORCE_MODULE_LOADING=prefer-serialized \
   -sdk "$IOS_SDK" \
   -resource-dir "$BOUND_SWIFT_RESOURCES" \
   -I "$BOUND_IPHONEOS_SWIFT" \
+  -I "$BOUND_SWIFT_RESOURCES/shims" \
   -I "$OUT_DEVELOPER/Platforms/iPhoneOS.platform/Developer/usr/lib" \
   -module-cache-path "$VALIDATION_CACHE" \
   -prebuilt-module-cache-path "$XTOOL_PREBUILT_ROOT" \
@@ -337,6 +339,7 @@ if ! SWIFT_FORCE_MODULE_LOADING=prefer-serialized \
   -sdk "$IOS_SDK" \
   -resource-dir "$BOUND_SWIFT_RESOURCES" \
   -I "$BOUND_IPHONEOS_SWIFT" \
+  -I "$BOUND_SWIFT_RESOURCES/shims" \
   -I "$OUT_DEVELOPER/Platforms/iPhoneOS.platform/Developer/usr/lib" \
   -module-cache-path "$SDK_IMPORT_CACHE" \
   -sdk-module-cache-path "$SDK_IMPORT_SDK_CACHE" \

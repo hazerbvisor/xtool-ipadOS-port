@@ -144,6 +144,14 @@ public extension PreparedToolchain {
 
         try Self.repairSwiftShimHeaders(sdk: sdk, resources: resources, fileManager: fileManager)
 
+        // -resource-dir alone does not reliably discover SwiftShims when
+        // rebuilding an SDK interface. Match the host preparation search path.
+        let resourceShims = resources.appendingPathComponent("shims", isDirectory: true)
+        if fileManager.fileExists(atPath: resourceShims.appendingPathComponent("module.modulemap").path),
+           !includePaths.contains(resourceShims) {
+            includePaths.insert(resourceShims, at: 0)
+        }
+
         let clangHeaders = resources
             .appendingPathComponent("clang/include", isDirectory: true)
         let clangBuiltinHeaders: URL?
