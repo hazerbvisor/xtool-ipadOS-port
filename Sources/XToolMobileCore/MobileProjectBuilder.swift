@@ -49,7 +49,7 @@ public enum MobileProjectBuilder {
         let manifestIdentity = String(decoding: try encoder.encode(manifest), as: UTF8.self)
         let engineAttributes = try? fm.attributesOfItem(atPath: engine.location.path)
         let sdkAttributes = try? fm.attributesOfItem(atPath: sdk.sdkURL.path)
-        let cacheIdentity = ["module-cache-v1", project.root.path, toolchain.root.path,
+        let cacheIdentity = ["module-cache-v2-validated-shims", project.root.path, toolchain.root.path,
             sdk.sdkURL.path, PreparedToolchain.expectedBundledRuntimeRevision,
             engine.location.path, String(describing: engineAttributes?[.modificationDate]),
             String(describing: engineAttributes?[.size]), String(describing: sdkAttributes?[.modificationDate]), manifestIdentity].joined(separator: "\n")
@@ -319,3 +319,4 @@ public enum MobileProjectBuilder {
                 + searched.joined(separator: "\n"))
     }
 }
+

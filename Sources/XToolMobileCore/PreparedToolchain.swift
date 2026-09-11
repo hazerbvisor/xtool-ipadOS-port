@@ -12,7 +12,7 @@ public struct PreparedToolchain: Sendable, Hashable {
     /// runtime cache stamp. Bundled-runtime discovery uses it to avoid silently
     /// reusing an older extracted SDK/runtime after an app update.
     public static let expectedBundledRuntimeRevision =
-        "swift-sdk-v6-validated-prebuilt-stdlib"
+        "swift-sdk-v7-validated-swift-shims"
 
     public let root: URL
 
@@ -270,3 +270,4 @@ public struct PreparedToolchain: Sendable, Hashable {
         return version.split(separator: ".").map { Int($0) ?? 0 }
     }
 }
+

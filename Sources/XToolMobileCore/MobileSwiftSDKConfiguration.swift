@@ -142,6 +142,8 @@ public extension PreparedToolchain {
             )
         }
 
+        try Self.repairSwiftShimHeaders(sdk: sdk, resources: resources, fileManager: fileManager)
+
         let clangHeaders = resources
             .appendingPathComponent("clang/include", isDirectory: true)
         let clangBuiltinHeaders: URL?
@@ -163,6 +165,39 @@ public extension PreparedToolchain {
             clangBuiltinHeaders: clangBuiltinHeaders,
             cameFromSwiftSDKMetadata: fromMetadata
         )
+    }
+
+    /// SDK exports can contain NULLcanary placeholders. Repair only from the
+    /// selected toolchain's corresponding header; never invent ABI declarations.
+    static func repairSwiftShimHeaders(
+        sdk: URL, resources: URL, fileManager: FileManager = .default
+    ) throws {
+        let shims = sdk.appendingPathComponent("usr/lib/swift/shims", isDirectory: true)
+        guard fileManager.fileExists(atPath: shims.path) else { return }
+        let files = try fileManager.contentsOfDirectory(at: shims, includingPropertiesForKeys: nil)
+        var repairs: [(URL, Data)] = []
+        for file in files where file.pathExtension == "h" || file.lastPathComponent == "module.modulemap" {
+            if let data = try? Data(contentsOf: file), Self.isUsableSwiftShim(data) { continue }
+            let replacement = resources.appendingPathComponent("shims", isDirectory: true)
+                .appendingPathComponent(file.lastPathComponent)
+            guard let data = try? Data(contentsOf: replacement), Self.isUsableSwiftShim(data) else {
+                throw MobileBuildBackendError.toolchainInvalid(
+                    "Invalid Swift shim header: \(file.path). No valid copy exists in the selected toolchain. "
+                    + "Rebuild/import a repaired XTool runtime; clearing the module cache alone cannot restore headers."
+                )
+            }
+            repairs.append((file, data))
+        }
+        // Validate every replacement before changing any files. Atomic writes
+        // replace placeholder symlinks rather than overwriting their targets.
+        for (file, data) in repairs { try data.write(to: file, options: .atomic) }
+    }
+
+    private static func isUsableSwiftShim(_ data: Data) -> Bool {
+        guard !data.isEmpty, !data.contains(0), let text = String(data: data, encoding: .utf8) else {
+            return false
+        }
+        return !text.contains("NULLcanary") && !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private func resolvedSwiftSDKPath(_ path: String) -> URL {

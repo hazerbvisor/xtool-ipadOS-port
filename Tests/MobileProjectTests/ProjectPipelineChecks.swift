@@ -198,6 +198,7 @@ private func workspaceChecks(in root: URL) throws {
         do { try action() } catch { return }
         throw NSError(domain: "TEST FAILED: " + message, code: 1)
     }
+    try swiftShimChecks(in: root.appendingPathComponent("shim-tests"))
     let endpoint = try MobileConnectionSettings.codexEndpoint("  https://host.example:8443/codex  ")
     try require(endpoint.scheme == "wss" && endpoint.port == 8443 && endpoint.path == "/codex", "pasted HTTPS proxy address normalizes to secure WebSocket")
     for address in ["", "https://chatgpt.com", "ws://192.168.1.5:4500", "wss://user:password@host.example", "wss://host.example?token=secret"] {
@@ -257,4 +258,38 @@ private func workspaceChecks(in root: URL) throws {
     try MobileModuleCache.clear(in: root)
     try require(!fm.fileExists(atPath: cache.path), "cache clearing")
     print("PASS: workspace paths, stale-edit preflight, edit undo, trash, diagnostics and cache identity")
+}
+
+
+
+private func swiftShimChecks(in root: URL) throws {
+    let fm = FileManager.default
+    let sdk = root.appendingPathComponent("sdk")
+    let resources = root.appendingPathComponent("resources")
+    let sdkShims = sdk.appendingPathComponent("usr/lib/swift/shims")
+    let toolShims = resources.appendingPathComponent("shims")
+    for directory in [sdkShims, toolShims] {
+        try fm.createDirectory(at: directory, withIntermediateDirectories: true)
+    }
+    let broken = sdkShims.appendingPathComponent("Visibility.h")
+    let donor = toolShims.appendingPathComponent("Visibility.h")
+    let valid = Data("#define SWIFT_RUNTIME_STDLIB_API extern\n".utf8)
+    let canary = Data("NULLcanary".utf8) + Data(repeating: 0, count: 10800)
+    try canary.write(to: broken)
+    try valid.write(to: donor)
+    try PreparedToolchain.repairSwiftShimHeaders(sdk: sdk, resources: resources)
+    let repaired = try Data(contentsOf: broken)
+    try require(repaired == valid, "canary header restored from selected toolchain")
+    try PreparedToolchain.repairSwiftShimHeaders(sdk: sdk, resources: resources)
+    try canary.write(to: broken)
+    try canary.write(to: donor)
+    do {
+        try PreparedToolchain.repairSwiftShimHeaders(sdk: sdk, resources: resources)
+        throw NSError(domain: "Invalid donor accepted", code: 1)
+    } catch MobileBuildBackendError.toolchainInvalid(let message) {
+        try require(message.contains("Visibility.h"), "invalid shim diagnostic names the failed header")
+    }
+    let unchanged = try Data(contentsOf: broken)
+    try require(unchanged == canary, "failed repair leaves original unchanged")
+    print("PASS: Swift shim canary repair, repeat validation and invalid donor rejection")
 }
