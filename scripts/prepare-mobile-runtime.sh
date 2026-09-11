@@ -7,7 +7,7 @@ TOOLCHAIN="$DEVELOPER/Toolchains/XcodeDefault.xctoolchain"
 OUT_ROOT="${1:-$PWD/.build/XToolMobileRuntime}"
 OUT_DEVELOPER="$OUT_ROOT/Developer"
 ARCHIVE="$OUT_ROOT.tar"
-RUNTIME_REV="swift-sdk-v6-validated-prebuilt-stdlib"
+RUNTIME_REV="swift-sdk-v7-validated-swift-shims"
 REQUIRED_HOST_SWIFT="6.3.2"
 
 if [[ ! -d "$DEVELOPER/Platforms/iPhoneOS.platform" ]]; then
@@ -155,6 +155,13 @@ echo "Selected iPhoneOS SDK: $IOS_SDK"
 echo "Detected SDK version:  $SDK_VERSION"
 
 BOUND_SWIFT_RESOURCES="$OUT_DEVELOPER/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift"
+# Restore stripped SDK placeholders before either serialized-module generation
+# or the Foundation/UIKit/SwiftUI compile gate. The host version was checked
+# above, so replacements come from the matching compiler, never arbitrary headers.
+SHIM_REPAIR="$(dirname "$0")/repair-mobile-swift-shims.py"
+HOST_SWIFT_SHIMS="$HOST_SWIFT_BIN/../lib/swift/shims"
+python3 "$SHIM_REPAIR" "$BOUND_SWIFT_RESOURCES/shims" "$HOST_SWIFT_SHIMS"
+python3 "$SHIM_REPAIR" "$IOS_SDK/usr/lib/swift/shims" "$BOUND_SWIFT_RESOURCES/shims" "$HOST_SWIFT_SHIMS"
 BOUND_IPHONEOS_SWIFT="$BOUND_SWIFT_RESOURCES/iphoneos"
 SWIFT_INTERFACE="$IOS_SDK/usr/lib/swift/Swift.swiftmodule/arm64e-apple-ios.swiftinterface"
 XTOOL_PREBUILT_ROOT="$BOUND_IPHONEOS_SWIFT/xtool-prebuilt-modules/$SDK_VERSION"
@@ -180,6 +187,7 @@ SWIFT_FORCE_MODULE_LOADING=prefer-serialized \
   -sdk "$IOS_SDK" \
   -resource-dir "$BOUND_SWIFT_RESOURCES" \
   -I "$BOUND_IPHONEOS_SWIFT" \
+  -I "$BOUND_SWIFT_RESOURCES/shims" \
   -I "$OUT_DEVELOPER/Platforms/iPhoneOS.platform/Developer/usr/lib" \
   -module-cache-path "$HOST_MODULE_CACHE" \
   -prebuilt-module-cache-path "$XTOOL_PREBUILT_ROOT" \
@@ -241,6 +249,7 @@ if ! SWIFT_FORCE_MODULE_LOADING=prefer-serialized \
   -sdk "$IOS_SDK" \
   -resource-dir "$BOUND_SWIFT_RESOURCES" \
   -I "$BOUND_IPHONEOS_SWIFT" \
+  -I "$BOUND_SWIFT_RESOURCES/shims" \
   -I "$OUT_DEVELOPER/Platforms/iPhoneOS.platform/Developer/usr/lib" \
   -module-cache-path "$VALIDATION_CACHE" \
   -prebuilt-module-cache-path "$XTOOL_PREBUILT_ROOT" \
@@ -330,6 +339,7 @@ if ! SWIFT_FORCE_MODULE_LOADING=prefer-serialized \
   -sdk "$IOS_SDK" \
   -resource-dir "$BOUND_SWIFT_RESOURCES" \
   -I "$BOUND_IPHONEOS_SWIFT" \
+  -I "$BOUND_SWIFT_RESOURCES/shims" \
   -I "$OUT_DEVELOPER/Platforms/iPhoneOS.platform/Developer/usr/lib" \
   -module-cache-path "$SDK_IMPORT_CACHE" \
   -sdk-module-cache-path "$SDK_IMPORT_SDK_CACHE" \

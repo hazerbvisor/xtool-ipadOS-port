@@ -9,7 +9,7 @@ LOG="$ROOT/.build/xtool-mobile-one-shot.log"
 CONFIGURATION="${CONFIGURATION:-debug}"
 TRIPLE="${TRIPLE:-arm64-apple-ios}"
 RUNTIME_ARCHIVE="$ROOT/.build/XToolMobileRuntime.tar"
-RUNTIME_REV="swift-sdk-v6-validated-prebuilt-stdlib"
+RUNTIME_REV="swift-sdk-v7-validated-swift-shims"
 RUNTIME_REV_STAMP="$ROOT/.build/.xtool-mobile-runtime-rev"
 IPA="$ROOT/.build/XToolMobileApp-unsigned.ipa"
 IPA_ENGINE_PATH="Payload/XToolMobileApp.app/Frameworks/libXToolCompilerEngine.dylib"
@@ -223,3 +223,4 @@ else
 fi
 
 exit "$status"
+
