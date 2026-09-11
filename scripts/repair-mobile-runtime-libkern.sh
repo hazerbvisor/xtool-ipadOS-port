@@ -47,16 +47,44 @@ find_runtime_sdk() {
     return 1
   fi
 
-  local found=()
-  shopt -s nullglob
-  found=("$sdk_dir"/iPhoneOS*.sdk)
-  shopt -u nullglob
-  if (( ${#found[@]} != 1 )); then
-    echo "error: expected exactly one iPhoneOS*.sdk under $sdk_dir, found ${#found[@]}" >&2
-    printf '  %s\n' "${found[@]:-}" >&2
-    return 1
+  # Prefer the SDK whose basename matches the donor exactly. Xcode-style SDK
+  # trees normally also contain iPhoneOS.sdk as an alias/symlink to the current
+  # versioned SDK, so counting every iPhoneOS*.sdk entry as a distinct SDK is
+  # incorrect.
+  local donor_name exact
+  donor_name="$(basename "$DONOR")"
+  exact="$sdk_dir/$donor_name"
+  if [[ -d "$exact" ]]; then
+    printf '%s\n' "$exact"
+    return 0
   fi
-  printf '%s\n' "${found[0]}"
+
+  # Otherwise ignore the generic iPhoneOS.sdk alias and consider only versioned
+  # SDK directories (for example iPhoneOS26.5.sdk).
+  local found=() candidate base
+  shopt -s nullglob
+  for candidate in "$sdk_dir"/iPhoneOS*.sdk; do
+    base="$(basename "$candidate")"
+    [[ "$base" == "iPhoneOS.sdk" ]] && continue
+    [[ -d "$candidate" ]] && found+=("$candidate")
+  done
+  shopt -u nullglob
+
+  if (( ${#found[@]} == 1 )); then
+    printf '%s\n' "${found[0]}"
+    return 0
+  fi
+
+  # Last-resort compatibility for a runtime that contains only iPhoneOS.sdk.
+  if (( ${#found[@]} == 0 )) && [[ -d "$sdk_dir/iPhoneOS.sdk" ]]; then
+    printf '%s\n' "$sdk_dir/iPhoneOS.sdk"
+    return 0
+  fi
+
+  echo "error: could not uniquely select a versioned iPhoneOS SDK under $sdk_dir" >&2
+  echo "donor basename: $donor_name" >&2
+  printf '  %s\n' "${found[@]:-}" >&2
+  return 1
 }
 
 repair_runtime_dir() {
