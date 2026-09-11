@@ -17,18 +17,28 @@ def usable(path):
 def repair(destination, sources):
     # Preflight the complete directory before writing any replacement.
     pending = []
-    if not destination.is_dir():
-        raise ValueError(f"Missing Swift shim directory: {destination}")
+    if destination.exists() and not destination.is_dir():
+        raise ValueError(f"Swift shim destination is not a directory: {destination}")
     files = set(destination.glob("*.h")) | {destination / "module.modulemap", destination / "Visibility.h"}
+    # Some Darwin exports omit the entire toolchain shims directory. Include
+    # the donor's complete text-header tree, not just Visibility.h: the module
+    # map imports other shim headers too. Preflight before creating the folder.
+    donor = next((root for root in sources
+                  if usable(root / "Visibility.h") and usable(root / "module.modulemap")), None)
+    if donor is not None:
+        files.update(destination / path.relative_to(donor)
+                     for path in donor.rglob("*") if path.is_file())
     for target in sorted(files):
         if usable(target):
             continue
-        source = next((root / target.name for root in sources if usable(root / target.name)), None)
+        relative = target.relative_to(destination)
+        source = next((root / relative for root in sources if usable(root / relative)), None)
         if source is None:
             raise ValueError(f"Invalid Swift shim {target}; no valid matching-toolchain replacement")
         pending.append((target, source.read_bytes()))
     for target, data in pending:
-        fd, temporary = tempfile.mkstemp(dir=destination, prefix=".xtool-shim-")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        fd, temporary = tempfile.mkstemp(dir=target.parent, prefix=".xtool-shim-")
         try:
             with os.fdopen(fd, "wb") as stream:
                 stream.write(data)

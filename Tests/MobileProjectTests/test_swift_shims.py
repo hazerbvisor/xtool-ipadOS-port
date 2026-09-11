@@ -1,6 +1,7 @@
 import importlib.util
 from pathlib import Path
 import tempfile
+import shutil
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -31,6 +32,24 @@ class SwiftShimRepairTests(unittest.TestCase):
     def test_missing_required_header_restored(self):
         (self.dest / "Visibility.h").unlink()
         self.assertEqual(repair.repair(self.dest, [self.source]), 1)
+
+    def test_missing_directory_populates_complete_donor_tree(self):
+        shutil.rmtree(self.dest)
+        (self.source / "SwiftStdint.h").write_text("typedef unsigned int swift_uint32;\n")
+        (self.source / "detail").mkdir()
+        (self.source / "detail/Extra.h").write_text("// nested shim\n")
+        self.assertEqual(repair.repair(self.dest, [self.source]), 4)
+        for source in self.source.rglob("*"):
+            if source.is_file():
+                self.assertEqual((self.dest / source.relative_to(self.source)).read_bytes(), source.read_bytes())
+        self.assertEqual(repair.repair(self.dest, [self.source]), 0)
+
+    def test_missing_directory_with_bad_donor_is_not_created(self):
+        shutil.rmtree(self.dest)
+        (self.source / "Visibility.h").write_bytes(b"NULLcanary\0")
+        with self.assertRaisesRegex(ValueError, "no valid"):
+            repair.repair(self.dest, [self.source])
+        self.assertFalse(self.dest.exists())
 
     def test_unrepairable_header_does_not_partially_modify_directory(self):
         (self.dest / "Visibility.h").write_bytes(b"NULLcanary\0")
