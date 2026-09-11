@@ -11,6 +11,7 @@ cd "$ROOT"
   Sources/XToolMobileCore/MobileSwiftSDKConfiguration.swift \
   Sources/XToolMobileCore/MobileAppProject.swift \
   Sources/XToolMobileCore/MobileAppStarter.swift \
+  Sources/XToolMobileCore/MobileAppExtensionBuilder.swift \
   Sources/XToolMobileCore/MobileProjectBuilder.swift \
   Sources/XToolMobileCore/MobileBuildLogRecovery.swift \
   Sources/XToolMobileCore/MobileConnectionSettings.swift \
