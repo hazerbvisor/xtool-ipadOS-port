@@ -1,18 +1,16 @@
 #!/usr/bin/env python3
 """Repair stripped/missing libkern headers in an XTool iPhoneOS SDK.
 
-This is intended to run inside Termux/proot (Debian, Ubuntu, etc.).  It never
-invents Apple SDK declarations: every repaired header is copied from a donor
-*iPhoneOS SDK of the same version*.
+This is intended to run inside Termux/proot (Debian, Ubuntu, etc.). It prefers
+headers already present in the same iPhoneOS SDK, then falls back to a matching
+donor iPhoneOS SDK. It never invents Apple SDK declarations.
 
-Typical usage:
-
-    python3 scripts/repair-mobile-sdk-libkern.py \
-        /path/to/XToolMobileRuntime/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS26.5.sdk \
-        /path/to/full/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS26.5.sdk
-
-The script preserves valid target files and only restores files that are
-missing, empty, contain NUL/NULLcanary placeholders, or are broken symlinks.
+A common stripped-SDK failure is loss of the libkern/machine architecture alias.
+On arm64 iPhoneOS, libkern/OSByteOrder.h may reference
+<libkern/machine/OSByteOrder.h> while the actual architecture implementation is
+still available as <libkern/arm/OSByteOrder.h>. In that case this repair copies
+the existing ARM implementation into the missing machine path so archived
+runtimes do not depend on preserving directory symlinks.
 """
 
 from __future__ import annotations
@@ -23,12 +21,14 @@ from pathlib import Path
 import plistlib
 import shutil
 import sys
+from typing import NoReturn
 
 REQUIRED_SENTINEL = Path("usr/include/libkern/machine/OSByteOrder.h")
+ARM_SENTINEL = Path("usr/include/libkern/arm/OSByteOrder.h")
 REPAIR_ROOT = Path("usr/include/libkern")
 
 
-def die(message: str) -> "NoReturn":
+def die(message: str) -> NoReturn:
     print(f"ERROR: {message}", file=sys.stderr)
     raise SystemExit(1)
 
@@ -46,8 +46,6 @@ def sdk_identity(sdk: Path) -> tuple[str | None, str | None]:
         except Exception:
             pass
 
-    # Some exported SDKs lose SDKSettings.plist metadata.  The directory name
-    # is still useful as a conservative fallback (e.g. iPhoneOS26.5.sdk).
     if version is None:
         name = sdk.name
         if name.startswith("iPhoneOS") and name.endswith(".sdk"):
@@ -69,17 +67,14 @@ def usable_file(path: Path) -> bool:
     return True
 
 
-def copy_donor_file(source: Path, destination: Path) -> None:
-    # Dereference donor symlinks on purpose.  XTool runtime archives are more
-    # reliable when the restored SDK header is self-contained instead of
-    # relying on a symlink target that may have been stripped separately.
+def copy_file(source: Path, destination: Path) -> None:
     real_source = source.resolve()
     if not real_source.is_file():
-        die(f"donor entry does not resolve to a regular file: {source}")
+        die(f"source entry does not resolve to a regular file: {source}")
 
     data = real_source.read_bytes()
     if not data or b"\x00" in data or b"NULLcanary" in data:
-        die(f"donor header is itself invalid: {source}")
+        die(f"source header is invalid: {source}")
 
     destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.is_symlink() or destination.exists():
@@ -115,18 +110,47 @@ def validate_sdk_pair(target: Path, donor: Path, allow_mismatch: bool) -> None:
         die(f"donor does not look like an iPhoneOS SDK: {donor_id}")
 
 
+def repair_machine_alias(target: Path, donor: Path, dry_run: bool) -> int:
+    """Restore machine/OSByteOrder.h from an existing arm implementation.
+
+    Exported Apple SDKs can lose the libkern/machine symlink/alias. Prefer the
+    target SDK's own ARM header, then the donor's ARM header, then the donor's
+    machine header if it survived there.
+    """
+    destination = target / REQUIRED_SENTINEL
+    if usable_file(destination):
+        return 0
+
+    candidates = [
+        (target / ARM_SENTINEL, "target ARM implementation"),
+        (donor / ARM_SENTINEL, "donor ARM implementation"),
+        (donor / REQUIRED_SENTINEL, "donor machine implementation"),
+    ]
+    for source, label in candidates:
+        if usable_file(source):
+            print(f"REPAIR [architecture alias]: {REQUIRED_SENTINEL} <- {label}: {source}")
+            if not dry_run:
+                copy_file(source, destination)
+            return 1
+
+    die(
+        "could not recover libkern/machine/OSByteOrder.h; neither target nor donor "
+        "contains a usable libkern/arm/OSByteOrder.h or machine implementation"
+    )
+
+
 def repair(target: Path, donor: Path, dry_run: bool = False) -> tuple[int, int]:
     donor_root = donor / REPAIR_ROOT
     target_root = target / REPAIR_ROOT
     if not donor_root.is_dir():
         die(f"donor SDK has no {REPAIR_ROOT}: {donor_root}")
 
-    sentinel = donor / REQUIRED_SENTINEL
-    if not usable_file(sentinel):
-        die(f"donor SDK does not contain a usable {REQUIRED_SENTINEL}")
-
-    repaired = 0
+    repaired = repair_machine_alias(target, donor, dry_run)
     preserved = 0
+
+    # Restore any other libkern files the donor actually contains. Missing
+    # architecture aliases are handled independently above, so the donor does
+    # not need to contain usr/include/libkern/machine itself.
     for source in sorted(donor_root.rglob("*")):
         if source.is_dir():
             continue
@@ -136,13 +160,15 @@ def repair(target: Path, donor: Path, dry_run: bool = False) -> tuple[int, int]:
         if usable_file(destination):
             preserved += 1
             continue
+        if not usable_file(source):
+            continue
 
         status = "missing"
         if destination.exists() or destination.is_symlink():
             status = "broken/placeholder"
         print(f"REPAIR [{status}]: {REPAIR_ROOT / relative}")
         if not dry_run:
-            copy_donor_file(source, destination)
+            copy_file(source, destination)
         repaired += 1
 
     return repaired, preserved
@@ -150,10 +176,10 @@ def repair(target: Path, donor: Path, dry_run: bool = False) -> tuple[int, int]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Restore missing/broken libkern headers in an XTool iPhoneOS SDK from a matching full iPhoneOS SDK."
+        description="Restore missing/broken libkern headers in an XTool iPhoneOS SDK without inventing Apple declarations."
     )
     parser.add_argument("target_sdk", type=Path, help="XTool/stripped iPhoneOS*.sdk to repair")
-    parser.add_argument("donor_sdk", type=Path, help="complete matching iPhoneOS*.sdk used as the donor")
+    parser.add_argument("donor_sdk", type=Path, help="matching iPhoneOS*.sdk used as an additional donor")
     parser.add_argument("--dry-run", action="store_true", help="show what would be repaired without writing files")
     parser.add_argument(
         "--allow-version-mismatch",
@@ -180,7 +206,7 @@ def main() -> int:
     print(f"PASS: {action} {repaired} libkern file(s); preserved {preserved} valid target file(s).")
     if not args.dry_run:
         print(f"PASS: {REQUIRED_SENTINEL} is present and usable.")
-        print("Next: rebuild XTool's runtime/archive (or copy the repaired SDK back into XTool Mobile) and retry WinPad.")
+        print("Next: import the repaired runtime archive into XTool Mobile and retry WinPad.")
     return 0
 
 
