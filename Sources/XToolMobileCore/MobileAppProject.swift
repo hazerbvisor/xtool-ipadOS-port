@@ -14,6 +14,7 @@ public struct MobileAppManifest: Codable, Sendable {
     public var linkFiles: [String]?
     public var librarySearchPaths: [String]?
     public var moduleSearchPaths: [String]?
+    public var linkerFlags: [String]?
     public var infoPlist: String?
     public var shortVersion: String?
     public var buildVersion: String?
