@@ -173,6 +173,7 @@ public enum MobileIPAPackager {
         case invalidArchivePath(String)
         case fileTooLarge(String)
         case archiveTooLarge
+        case compressionUnavailable(String)
         case compressionFailed(String)
         case invalidArchive(String)
 
@@ -186,6 +187,8 @@ public enum MobileIPAPackager {
                 return "ZIP32 cannot package a file larger than 4 GiB: \(path)"
             case .archiveTooLarge:
                 return "ZIP32 archive exceeded 4 GiB"
+            case .compressionUnavailable(let path):
+                return "IPA compression is unavailable for: \(path)"
             case .compressionFailed(let path):
                 return "failed to deflate IPA input: \(path)"
             case .invalidArchive(let reason):
@@ -200,6 +203,7 @@ private enum VerifiedZIP {
     private static let storedMethod: UInt16 = 0
     private static let deflateMethod: UInt16 = 8
     private static let ioBufferSize = 1024 * 1024
+    private static let minimumDeflateSize: UInt64 = 4 * 1024
 
     enum Entry {
         case file(sourceURL: URL, archivePath: String, unixMode: UInt32)
@@ -208,12 +212,6 @@ private enum VerifiedZIP {
         var archivePath: String {
             switch self {
             case .file(_, let path, _), .data(_, let path, _): return path
-            }
-        }
-
-        var unixMode: UInt32 {
-            switch self {
-            case .file(_, _, let mode), .data(_, _, let mode): return mode
             }
         }
     }
@@ -289,44 +287,51 @@ private enum VerifiedZIP {
                     )
                 }
 
-                #if canImport(Compression)
                 if shouldDeflate(sourceURL, size: fileSize) {
+                    #if canImport(Compression)
                     let compressedURL = staging.appendingPathComponent("entry-\(index).deflate")
-                    do {
-                        let encoded = try encodeDeflate(sourceURL, to: compressedURL, expectedSize: fileSize)
-                        let decoded = try decodeDigest(compressedURL)
-                        let compressedSize = ((try fm.attributesOfItem(atPath: compressedURL.path)[.size]) as? NSNumber)?
-                            .uint64Value ?? 0
+                    let encoded = try encodeDeflate(
+                        sourceURL,
+                        to: compressedURL,
+                        expectedSize: fileSize
+                    )
+                    let compressedSize = ((try fm.attributesOfItem(atPath: compressedURL.path)[.size]) as? NSNumber)?
+                        .uint64Value ?? 0
 
-                        if encoded.size == fileSize,
-                           encoded.crc32 == sourceDigest.crc32,
-                           decoded.size == fileSize,
-                           decoded.crc32 == sourceDigest.crc32,
-                           compressedSize > 0,
-                           compressedSize <= UInt64(UInt32.max) {
-                            prepared.append(
-                                PreparedEntry(
-                                    sourceURL: compressedURL,
-                                    inlineData: nil,
-                                    archivePath: archivePath,
-                                    unixMode: unixMode,
-                                    method: deflateMethod,
-                                    crc32: sourceDigest.crc32,
-                                    compressedSize: UInt32(compressedSize),
-                                    uncompressedSize: UInt32(fileSize),
-                                    dosTime: dosTime,
-                                    dosDate: dosDate
-                                )
-                            )
-                            continue
-                        }
-                    } catch {
-                        // Compression is an optimization, not a correctness requirement.
-                        // If encoding or verification fails, store this entry verbatim.
-                        try? fm.removeItem(at: compressedURL)
+                    guard encoded.size == fileSize,
+                          encoded.crc32 == sourceDigest.crc32,
+                          compressedSize > 0,
+                          compressedSize <= UInt64(UInt32.max) else {
+                        throw MobileIPAPackager.PackagerError.compressionFailed(sourceURL.path)
                     }
+
+                    // DEFLATE is used only when it actually makes the IPA smaller.
+                    // This avoids expanding media/opaque data that happened to pass
+                    // the extension filter.
+                    if compressedSize < fileSize {
+                        prepared.append(
+                            PreparedEntry(
+                                sourceURL: compressedURL,
+                                inlineData: nil,
+                                archivePath: archivePath,
+                                unixMode: unixMode,
+                                method: deflateMethod,
+                                crc32: sourceDigest.crc32,
+                                compressedSize: UInt32(compressedSize),
+                                uncompressedSize: UInt32(fileSize),
+                                dosTime: dosTime,
+                                dosDate: dosDate
+                            )
+                        )
+                        continue
+                    }
+                    try? fm.removeItem(at: compressedURL)
+                    #else
+                    // Never silently export a huge STORE-only IPA when a sizeable,
+                    // normally-compressible input was expected to be deflated.
+                    throw MobileIPAPackager.PackagerError.compressionUnavailable(sourceURL.path)
+                    #endif
                 }
-                #endif
 
                 prepared.append(
                     PreparedEntry(
@@ -474,7 +479,7 @@ private enum VerifiedZIP {
     }
 
     private static func shouldDeflate(_ url: URL, size: UInt64) -> Bool {
-        guard size >= 4 * 1024 else { return false }
+        guard size >= minimumDeflateSize else { return false }
         let alreadyCompressed = Set([
             "7z", "aac", "bz2", "gif", "gz", "heic", "heif", "ipa", "jpeg", "jpg",
             "lz4", "m4a", "mov", "mp3", "mp4", "pdf", "png", "webp", "xz", "zip",
@@ -515,14 +520,18 @@ private enum VerifiedZIP {
 
         var sourceData = Data()
         var status = COMPRESSION_STATUS_OK
-        var flags: Int32 = 0
         var totalRead: UInt64 = 0
         var crc = CRC32.initial
+        var reachedEOF = false
 
-        while status == COMPRESSION_STATUS_OK {
-            if stream.src_size == 0 {
+        repeat {
+            var flags: Int32 = 0
+
+            if stream.src_size == 0 && !reachedEOF {
                 sourceData = try input.read(upToCount: ioBufferSize) ?? Data()
-                if !sourceData.isEmpty {
+                if sourceData.isEmpty {
+                    reachedEOF = true
+                } else {
                     crc = CRC32.update(crc, with: sourceData)
                     totalRead += UInt64(sourceData.count)
                     guard totalRead <= expectedSize else {
@@ -530,11 +539,15 @@ private enum VerifiedZIP {
                             "source grew while compressing: \(sourceURL.lastPathComponent)"
                         )
                     }
+                    stream.src_size = sourceData.count
+                    if totalRead == expectedSize {
+                        reachedEOF = true
+                    }
                 }
-                stream.src_size = sourceData.count
-                flags = totalRead == expectedSize
-                    ? Int32(COMPRESSION_STREAM_FINALIZE.rawValue)
-                    : 0
+            }
+
+            if reachedEOF {
+                flags = Int32(COMPRESSION_STREAM_FINALIZE.rawValue)
             }
 
             sourceData.withUnsafeBytes { rawBuffer in
@@ -557,88 +570,13 @@ private enum VerifiedZIP {
             default:
                 throw MobileIPAPackager.PackagerError.compressionFailed(sourceURL.path)
             }
-        }
+        } while status == COMPRESSION_STATUS_OK
 
         guard status == COMPRESSION_STATUS_END, totalRead == expectedSize else {
             throw MobileIPAPackager.PackagerError.compressionFailed(sourceURL.path)
         }
         try output.synchronize()
         return Digest(crc32: CRC32.finalize(crc), size: totalRead)
-    }
-
-    private static func decodeDigest(_ compressedURL: URL) throws -> Digest {
-        let input = try FileHandle(forReadingFrom: compressedURL)
-        defer { try? input.close() }
-
-        let destination = UnsafeMutablePointer<UInt8>.allocate(capacity: ioBufferSize)
-        defer { destination.deallocate() }
-
-        var stream = compression_stream(
-            dst_ptr: destination,
-            dst_size: ioBufferSize,
-            src_ptr: UnsafePointer(destination),
-            src_size: 0,
-            state: nil
-        )
-        guard compression_stream_init(&stream, COMPRESSION_STREAM_DECODE, COMPRESSION_ZLIB)
-                != COMPRESSION_STATUS_ERROR else {
-            throw MobileIPAPackager.PackagerError.compressionFailed(compressedURL.path)
-        }
-        defer { compression_stream_destroy(&stream) }
-
-        let compressedSize = ((try FileManager.default.attributesOfItem(atPath: compressedURL.path)[.size]) as? NSNumber)?
-            .uint64Value ?? 0
-        var sourceData = Data()
-        var status = COMPRESSION_STATUS_OK
-        var totalInput: UInt64 = 0
-        var decodedSize: UInt64 = 0
-        var crc = CRC32.initial
-
-        while status == COMPRESSION_STATUS_OK {
-            if stream.src_size == 0 {
-                sourceData = try input.read(upToCount: ioBufferSize) ?? Data()
-                totalInput += UInt64(sourceData.count)
-                stream.src_size = sourceData.count
-            }
-
-            sourceData.withUnsafeBytes { rawBuffer in
-                if let base = rawBuffer.bindMemory(to: UInt8.self).baseAddress {
-                    stream.src_ptr = base.advanced(by: sourceData.count - stream.src_size)
-                } else {
-                    stream.src_ptr = UnsafePointer(destination)
-                }
-                let flags = totalInput == compressedSize
-                    ? Int32(COMPRESSION_STREAM_FINALIZE.rawValue)
-                    : 0
-                status = compression_stream_process(&stream, flags)
-            }
-
-            switch status {
-            case COMPRESSION_STATUS_OK, COMPRESSION_STATUS_END:
-                let produced = ioBufferSize - stream.dst_size
-                if produced > 0 {
-                    let data = Data(bytes: destination, count: produced)
-                    crc = CRC32.update(crc, with: data)
-                    decodedSize += UInt64(produced)
-                    guard decodedSize <= UInt64(UInt32.max) else {
-                        throw MobileIPAPackager.PackagerError.archiveTooLarge
-                    }
-                }
-                stream.dst_ptr = destination
-                stream.dst_size = ioBufferSize
-            default:
-                throw MobileIPAPackager.PackagerError.compressionFailed(compressedURL.path)
-            }
-
-            if sourceData.isEmpty && status == COMPRESSION_STATUS_OK {
-                throw MobileIPAPackager.PackagerError.compressionFailed(compressedURL.path)
-            }
-        }
-
-        guard status == COMPRESSION_STATUS_END else {
-            throw MobileIPAPackager.PackagerError.compressionFailed(compressedURL.path)
-        }
-        return Digest(crc32: CRC32.finalize(crc), size: decodedSize)
     }
     #endif
 
