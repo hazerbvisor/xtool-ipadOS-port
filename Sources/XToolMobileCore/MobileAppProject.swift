@@ -76,9 +76,57 @@ public struct MobileAppManifest: Codable, Sendable {
                 "This project needs xtool-mobile.json. For SwiftPM projects, prepare it with scripts/prepare-mobile-project.py on your build host first."
             )
         }
-        let manifest = try JSONDecoder().decode(Self.self, from: Data(contentsOf: url))
+        var manifest = try JSONDecoder().decode(Self.self, from: Data(contentsOf: url))
+        // Validate user-controlled URLs/checksums before any network access.
         _ = try manifest.allOrderedTargets()
+        try manifest.applyBinaryFrameworks(projectRoot: root)
         return manifest
+    }
+
+    private mutating func applyBinaryFrameworks(projectRoot: URL) throws {
+        let specifications = binaryFrameworks ?? []
+        guard !specifications.isEmpty else { return }
+
+        // Keep binary artifacts inside a hidden project-local cache. This gives
+        // the existing mobile compiler deterministic ${PROJECT}-relative -F
+        // paths without changing the stable linker/compiler pipeline.
+        let artifactCache = projectRoot.appendingPathComponent(".xtool-mobile-cache", isDirectory: true)
+        let resolved = try MobileBinaryFrameworkResolver.resolve(
+            specifications,
+            cacheDirectory: artifactCache
+        )
+        let root = projectRoot.resolvingSymlinksInPath().standardizedFileURL
+
+        for binary in resolved {
+            let searchPath = binary.searchPath.resolvingSymlinksInPath().standardizedFileURL
+            guard searchPath.path.hasPrefix(root.path + "/") else {
+                throw MobileProjectBuildError.invalid(
+                    "Resolved binary framework escaped project cache: \(binary.name)"
+                )
+            }
+            let relativeSearchPath = String(searchPath.path.dropFirst(root.path.count + 1))
+            let expandedSearchPath = "${PROJECT}/\(relativeSearchPath)"
+
+            if let targetIndex = targets.firstIndex(where: { $0.name == executableTarget }) {
+                var swiftFlags = targets[targetIndex].swiftFlags ?? []
+                swiftFlags += ["-F", expandedSearchPath]
+                targets[targetIndex].swiftFlags = swiftFlags
+
+                var cFlags = targets[targetIndex].cFlags ?? []
+                cFlags += ["-F", expandedSearchPath]
+                targets[targetIndex].cFlags = cFlags
+            }
+
+            var flags = linkerFlags ?? []
+            flags += ["-F", expandedSearchPath]
+            linkerFlags = flags
+
+            var linkedFrameworks = frameworks ?? []
+            if !linkedFrameworks.contains(binary.name) {
+                linkedFrameworks.append(binary.name)
+            }
+            frameworks = linkedFrameworks
+        }
     }
 
     /// Dependency closure for the host app, with missing dependencies and cycles rejected.
