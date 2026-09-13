@@ -35,12 +35,5 @@ public struct MobileProject: Sendable, Hashable {
               fileManager.fileExists(atPath: root.appendingPathComponent(MobileAppManifest.filename).path) else {
             throw MobileBuildBackendError.backendUnavailable("Select a folder containing xtool-mobile.json or Package.swift")
         }
-
-        // Optional native SDK dependencies (XCFramework ZIPs) are resolved when
-        // the project is opened. Existing projects without the sidecar are a no-op.
-        try MobileBinaryDependencyResolver.resolveIfPresent(
-            at: root,
-            fileManager: fileManager
-        )
     }
 }
