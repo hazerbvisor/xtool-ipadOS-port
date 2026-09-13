@@ -9,6 +9,7 @@ cd "$ROOT"
   Sources/XToolMobileCore/MobileProject.swift \
   Sources/XToolMobileCore/PreparedToolchain.swift \
   Sources/XToolMobileCore/MobileSwiftSDKConfiguration.swift \
+  Sources/XToolMobileCore/MobileBinaryFrameworkResolver.swift \
   Sources/XToolMobileCore/MobileAppProject.swift \
   Sources/XToolMobileCore/MobileAppStarter.swift \
   Sources/XToolMobileCore/MobileAppExtensionBuilder.swift \
