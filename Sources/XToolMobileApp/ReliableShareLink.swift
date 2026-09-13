@@ -4,18 +4,30 @@ import UIKit
 /// XTool Mobile uses file URLs for its export actions. SwiftUI's `ShareLink`
 /// can present an empty share sheet for large/generated files on iPadOS, so use
 /// the system document exporter instead. Keeping the same type name makes this
-/// a drop-in replacement for the existing `ShareLink(item: URL) { ... }` calls
-/// in XToolMobileApp without changing the surrounding IDE UI.
-struct ShareLink<LabelContent: View>: View {
+/// a drop-in replacement for the existing export actions while keeping the
+/// surrounding IDE UI unchanged.
+///
+/// This wrapper is intentionally non-generic. The mobile Swift compiler has a
+/// much smaller type-checking budget than desktop Xcode, and a generic wrapper
+/// here can make large SwiftUI expressions time out while compiling on-device.
+struct ShareLink: View {
     let item: URL
-    private let label: () -> LabelContent
+    private let label: AnyView
 
     @State private var isPresentingExporter = false
     @State private var exportError: String?
 
-    init(item: URL, @ViewBuilder label: @escaping () -> LabelContent) {
+    init<LabelContent: View>(
+        item: URL,
+        @ViewBuilder label: () -> LabelContent
+    ) {
         self.item = item
-        self.label = label
+        self.label = AnyView(label())
+    }
+
+    init(_ titleKey: LocalizedStringKey, item: URL) {
+        self.item = item
+        self.label = AnyView(Text(titleKey))
     }
 
     var body: some View {
@@ -26,7 +38,7 @@ struct ShareLink<LabelContent: View>: View {
             }
             isPresentingExporter = true
         } label: {
-            label()
+            label
         }
         .fullScreenCover(isPresented: $isPresentingExporter) {
             XToolDocumentExportPicker(fileURL: item) {
