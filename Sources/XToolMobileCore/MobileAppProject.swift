@@ -21,6 +21,7 @@ public struct MobileAppManifest: Codable, Sendable {
     public var reuseCompilerEngine: Bool?
     public var reuseBundledRuntime: Bool?
     public var extensions: [AppExtension]?
+    public var binaryFrameworks: [BinaryFramework]?
 
     public struct Target: Codable, Sendable {
         public var name: String
@@ -36,6 +37,15 @@ public struct MobileAppManifest: Codable, Sendable {
     public struct Resource: Codable, Sendable {
         public var path: String
         public var destination: String
+    }
+
+    /// A checksum-pinned remote XCFramework archive. XTool Mobile downloads each
+    /// archive once, verifies SHA-256, selects the arm64 iOS device slice, and
+    /// adds the contained framework to Swift/Clang and LLD search paths.
+    public struct BinaryFramework: Codable, Sendable {
+        public var name: String
+        public var url: String
+        public var checksum: String
     }
 
     /// One embedded Foundation-style app extension (.appex).
@@ -121,6 +131,24 @@ public struct MobileAppManifest: Codable, Sendable {
         }
         guard byName[executableTarget] != nil else {
             throw MobileProjectBuildError.invalid("Missing executable target: \(executableTarget)")
+        }
+
+        var frameworkNames: Set<String> = []
+        for framework in binaryFrameworks ?? [] {
+            try Self.validateName(framework.name)
+            guard frameworkNames.insert(framework.name).inserted else {
+                throw MobileProjectBuildError.invalid("Duplicate binary framework: \(framework.name)")
+            }
+            guard let remoteURL = URL(string: framework.url),
+                  remoteURL.scheme?.lowercased() == "https",
+                  remoteURL.host != nil else {
+                throw MobileProjectBuildError.invalid("Binary framework \(framework.name) needs an HTTPS URL")
+            }
+            let checksum = framework.checksum.lowercased()
+            guard checksum.count == 64,
+                  checksum.allSatisfy({ $0.isHexDigit }) else {
+                throw MobileProjectBuildError.invalid("Binary framework \(framework.name) needs a 64-character SHA-256 checksum")
+            }
         }
 
         var productNames: Set<String> = [name]
