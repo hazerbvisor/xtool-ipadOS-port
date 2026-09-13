@@ -6,7 +6,7 @@ import ZIPFoundation
 /// project's build manifest. This keeps mobile projects declarative while still
 /// allowing native SDKs distributed as XCFramework ZIPs (for example ad SDKs).
 public enum MobileBinaryDependencyResolver {
-    public static let filename = "xtool-mobile-dependencies.json"
+    public static let sidecarFilename = "xtool-mobile-dependencies.json"
 
     public struct Configuration: Codable, Sendable {
         public var schemaVersion: Int
@@ -17,6 +17,13 @@ public enum MobileBinaryDependencyResolver {
         public var name: String
         public var url: String
         public var sha256: String?
+        public var checksum: String?
+
+        var expectedSHA256: String? { sha256 ?? checksum }
+    }
+
+    private struct ManifestDependencies: Decodable {
+        var binaryFrameworks: [BinaryFramework]?
     }
 
     private struct Receipt: Codable, Equatable {
@@ -24,27 +31,42 @@ public enum MobileBinaryDependencyResolver {
         var sha256: String?
     }
 
-    /// Resolve dependencies only when a sidecar configuration exists. Existing
-    /// projects without the sidecar keep exactly the same build path.
+    /// Resolve dependencies declared directly in xtool-mobile.json. A legacy
+    /// sidecar is also accepted so experiments do not need to rewrite manifests.
+    /// Projects that declare no binary frameworks keep exactly the old path.
     public static func resolveIfPresent(
         at projectRoot: URL,
         fileManager: FileManager = .default
     ) throws {
-        let configurationURL = projectRoot.appendingPathComponent(filename)
-        guard fileManager.fileExists(atPath: configurationURL.path) else { return }
+        let manifestURL = projectRoot.appendingPathComponent(MobileAppManifest.filename)
+        let sidecarURL = projectRoot.appendingPathComponent(sidecarFilename)
 
-        let configuration = try JSONDecoder().decode(
-            Configuration.self,
-            from: Data(contentsOf: configurationURL)
-        )
-        guard configuration.schemaVersion == 1 else {
-            throw MobileProjectBuildError.invalid(
-                "Unsupported \(filename) schema \(configuration.schemaVersion)"
+        var dependencies: [BinaryFramework] = []
+        if fileManager.fileExists(atPath: manifestURL.path) {
+            let manifest = try JSONDecoder().decode(
+                ManifestDependencies.self,
+                from: Data(contentsOf: manifestURL)
             )
+            dependencies.append(contentsOf: manifest.binaryFrameworks ?? [])
         }
 
+        if fileManager.fileExists(atPath: sidecarURL.path) {
+            let configuration = try JSONDecoder().decode(
+                Configuration.self,
+                from: Data(contentsOf: sidecarURL)
+            )
+            guard configuration.schemaVersion == 1 else {
+                throw MobileProjectBuildError.invalid(
+                    "Unsupported \(sidecarFilename) schema \(configuration.schemaVersion)"
+                )
+            }
+            dependencies.append(contentsOf: configuration.binaryFrameworks)
+        }
+
+        guard !dependencies.isEmpty else { return }
+
         var seen: Set<String> = []
-        for dependency in configuration.binaryFrameworks {
+        for dependency in dependencies {
             try MobileAppManifest.validateName(dependency.name)
             guard seen.insert(dependency.name).inserted else {
                 throw MobileProjectBuildError.invalid(
@@ -67,7 +89,7 @@ public enum MobileBinaryDependencyResolver {
             )
         }
 
-        let normalizedChecksum = dependency.sha256?.lowercased()
+        let normalizedChecksum = dependency.expectedSHA256?.lowercased()
         if let normalizedChecksum,
            normalizedChecksum.count != 64 ||
            !normalizedChecksum.allSatisfy({ $0.isHexDigit }) {
@@ -81,19 +103,19 @@ public enum MobileBinaryDependencyResolver {
             .appendingPathComponent("dependencies", isDirectory: true)
             .appendingPathComponent(dependency.name, isDirectory: true)
         let frameworksRoot = dependencyRoot.appendingPathComponent("Frameworks", isDirectory: true)
-        let expectedFramework = frameworksRoot.appendingPathComponent("\(dependency.name).framework", isDirectory: true)
         let receiptURL = dependencyRoot.appendingPathComponent("receipt.json")
         let wantedReceipt = Receipt(url: dependency.url, sha256: normalizedChecksum)
 
-        if fileManager.fileExists(atPath: expectedFramework.path),
+        if containsFramework(in: frameworksRoot, fileManager: fileManager),
            let receiptData = try? Data(contentsOf: receiptURL),
            let receipt = try? JSONDecoder().decode(Receipt.self, from: receiptData),
            receipt == wantedReceipt {
             return
         }
 
-        let installRoot = dependencyRoot
-            .deletingLastPathComponent()
+        let parentRoot = dependencyRoot.deletingLastPathComponent()
+        try fileManager.createDirectory(at: parentRoot, withIntermediateDirectories: true)
+        let installRoot = parentRoot
             .appendingPathComponent(".\(dependency.name)-\(UUID().uuidString)", isDirectory: true)
         defer { try? fileManager.removeItem(at: installRoot) }
         try fileManager.createDirectory(at: installRoot, withIntermediateDirectories: true)
@@ -140,7 +162,11 @@ public enum MobileBinaryDependencyResolver {
             )
         }
 
-        let xcframework = try findXCFramework(named: dependency.name, under: unpackedURL, fileManager: fileManager)
+        let xcframework = try findXCFramework(
+            named: dependency.name,
+            under: unpackedURL,
+            fileManager: fileManager
+        )
         let framework = try selectDeviceFramework(
             named: dependency.name,
             xcframework: xcframework,
@@ -150,7 +176,10 @@ public enum MobileBinaryDependencyResolver {
         let stagedRoot = installRoot.appendingPathComponent("resolved", isDirectory: true)
         let stagedFrameworks = stagedRoot.appendingPathComponent("Frameworks", isDirectory: true)
         try fileManager.createDirectory(at: stagedFrameworks, withIntermediateDirectories: true)
-        let stagedFramework = stagedFrameworks.appendingPathComponent(framework.lastPathComponent, isDirectory: true)
+        let stagedFramework = stagedFrameworks.appendingPathComponent(
+            framework.lastPathComponent,
+            isDirectory: true
+        )
         try fileManager.copyItem(at: framework, to: stagedFramework)
         try JSONEncoder().encode(wantedReceipt)
             .write(to: stagedRoot.appendingPathComponent("receipt.json"), options: .atomic)
@@ -160,11 +189,23 @@ public enum MobileBinaryDependencyResolver {
         }
         try fileManager.moveItem(at: stagedRoot, to: dependencyRoot)
 
-        guard fileManager.fileExists(atPath: expectedFramework.path) else {
+        guard containsFramework(in: frameworksRoot, fileManager: fileManager) else {
             throw MobileProjectBuildError.invalid(
-                "Resolved \(dependency.name) but did not produce \(expectedFramework.lastPathComponent)"
+                "Resolved \(dependency.name) but produced no framework bundle"
             )
         }
+    }
+
+    private static func containsFramework(
+        in directory: URL,
+        fileManager: FileManager
+    ) -> Bool {
+        guard let items = try? fileManager.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) else { return false }
+        return items.contains { $0.pathExtension == "framework" }
     }
 
     private static func findXCFramework(
