@@ -82,19 +82,35 @@ enum MobileBinaryFrameworkResolver {
                 fileManager: fm
             )
 
+            // iOS commonly exposes app-container paths through both /var/... and
+            // /private/var/.... FileManager enumeration may return the canonical
+            // /private/var spelling even when the extraction URL was created from
+            // /var, so compare canonical paths while both locations still exist.
+            let canonicalExtractedPath = extracted
+                .resolvingSymlinksInPath()
+                .standardizedFileURL
+                .path
+            let canonicalFrameworkPath = framework
+                .resolvingSymlinksInPath()
+                .standardizedFileURL
+                .path
+            guard canonicalFrameworkPath.hasPrefix(canonicalExtractedPath + "/") else {
+                throw MobileProjectBuildError.invalid("Resolved framework escaped extraction root")
+            }
+            let relative = String(canonicalFrameworkPath.dropFirst(canonicalExtractedPath.count + 1))
+
             if fm.fileExists(atPath: artifactRoot.path) {
                 try fm.removeItem(at: artifactRoot)
             }
             try fm.createDirectory(at: artifactRoot.deletingLastPathComponent(), withIntermediateDirectories: true)
             try fm.moveItem(at: extracted, to: artifactRoot)
 
-            let originalExtractedPath = extracted.standardizedFileURL.path
-            let originalFrameworkPath = framework.standardizedFileURL.path
-            guard originalFrameworkPath.hasPrefix(originalExtractedPath + "/") else {
-                throw MobileProjectBuildError.invalid("Resolved framework escaped extraction root")
-            }
-            let relative = String(originalFrameworkPath.dropFirst(originalExtractedPath.count + 1))
             let finalFramework = artifactRoot.appendingPathComponent(relative)
+            guard fm.fileExists(atPath: finalFramework.path) else {
+                throw MobileProjectBuildError.invalid(
+                    "Resolved framework disappeared while caching \(specification.name)"
+                )
+            }
             try (relative + "\n").write(to: marker, atomically: true, encoding: .utf8)
             log("Resolved arm64 iOS framework: \(specification.name)")
             return ResolvedMobileBinaryFramework(name: specification.name, frameworkURL: finalFramework)
