@@ -10,8 +10,9 @@ import sys
 
 path = Path(sys.argv[1])
 text = path.read_text()
+changed = False
 
-old = '''                    if let clang = sdk.clangBuiltinHeaders {
+old_order = '''                    if let clang = sdk.clangBuiltinHeaders {
                         args += [
                             "-resource-dir", clang.deletingLastPathComponent().path,
                             "-internal-isystem", clang.path,
@@ -31,7 +32,7 @@ old = '''                    if let clang = sdk.clangBuiltinHeaders {
                     }
 '''
 
-new = '''                    // Match Apple's Clang C++ header search order. libc++ must come
+fixed_order = '''                    // Match Apple's Clang C++ header search order. libc++ must come
                     // before Clang's builtin wrappers and the SDK C headers because
                     // libc++ C-compatibility wrappers use #include_next to reach them.
                     if language.contains("++") {
@@ -54,15 +55,52 @@ new = '''                    // Match Apple's Clang C++ header search order. lib
                     ]
 '''
 
-if new in text:
+if fixed_order not in text:
+    count = text.count(old_order)
+    if count != 1:
+        raise SystemExit(
+            f"Expected exactly one native Clang header-order block, found {count}; refusing to patch."
+        )
+    text = text.replace(old_order, fixed_order, 1)
+    changed = True
+    print("Fixed mobile C++ header search order.")
+else:
     print("Mobile C++ header order already fixed.")
-    raise SystemExit(0)
 
-count = text.count(old)
-if count != 1:
-    raise SystemExit(f"Expected exactly one native Clang header-order block, found {count}; refusing to patch.")
+# XTool invokes Clang's frontend directly rather than the normal clang driver.
+# The driver normally asks Clang to advertise GCC compatibility macros. Apple
+# SDK headers depend on those macros; without them sys/cdefs.h treats the
+# compiler as unsupported and strict C++ can set __DARWIN_NO_LONG_LONG=1,
+# hiding lldiv_t/lldiv from libc++.
+gnuc_flag = '                            "-fgnuc-version=4.2.1",\n'
+if gnuc_flag not in text:
+    old_args = '''                        "-pic-level", "2",
+                        "-fblocks",
+                        "-O0",
+'''
+    new_args = '''                        "-pic-level", "2",
+                        "-fblocks",
+                        // Match the normal Clang driver's Darwin/GCC compatibility
+                        // macros (__GNUC__, __GNUG__, etc.) for Apple SDK headers.
+                        "-fgnuc-version=4.2.1",
+                        "-O0",
+'''
+    count = text.count(old_args)
+    if count != 1:
+        raise SystemExit(
+            f"Expected exactly one native Clang argument block, found {count}; refusing to patch."
+        )
+    text = text.replace(old_args, new_args, 1)
+    changed = True
+    print("Enabled Clang GNU compatibility macros with -fgnuc-version=4.2.1.")
+else:
+    print("Clang GNU compatibility macros already enabled.")
 
-path.write_text(text.replace(old, new, 1))
-print(f"Patched {path}")
-print("C++ order is now: libc++ -> Clang builtin headers -> SDK C headers -> frameworks")
+if changed:
+    path.write_text(text)
+    print(f"Patched {path}")
+else:
+    print("No changes needed.")
+
+print("Native Clang compatibility: libc++ -> builtin headers -> SDK C headers; GNU macros 4.2.1")
 PY
