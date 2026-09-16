@@ -21,6 +21,7 @@
 #endif
 
 LLD_HAS_DRIVER(macho)
+LLD_HAS_DRIVER(coff)
 
 namespace {
 
@@ -130,6 +131,43 @@ extern "C" int32_t xtool_lld_macho_run(
 
     const lld::DriverDef drivers[] = {
         {lld::Darwin, &lld::macho::link},
+    };
+
+    const lld::Result result = lld::lldMain(
+        arguments,
+        llvm::outs(),
+        llvm::errs(),
+        drivers
+    );
+
+    if (!result.canRunAgain) {
+        gLLDCanRunAgain.store(false, std::memory_order_release);
+    }
+
+    return static_cast<int32_t>(result.retCode);
+}
+
+extern "C" int32_t xtool_lld_coff_run(
+    int32_t argc,
+    const char *const *argv
+) {
+    if (argc < 0 || (argc > 0 && argv == nullptr)) {
+        return 64;
+    }
+
+    if (!gLLDCanRunAgain.load(std::memory_order_acquire)) {
+        llvm::errs() << "xtool: embedded LLD cannot safely be re-entered after the previous link\n";
+        return 70;
+    }
+
+    // Select LLD's Windows linker flavor without depending on argv[0] parsing
+    // in Swift. Callers pass ordinary lld-link arguments such as /machine:x64.
+    llvm::SmallVector<const char *, 32> arguments;
+    arguments.push_back("lld-link");
+    arguments.append(argv, argv + static_cast<size_t>(argc));
+
+    const lld::DriverDef drivers[] = {
+        {lld::WinLink, &lld::coff::link},
     };
 
     const lld::Result result = lld::lldMain(
