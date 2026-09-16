@@ -8,11 +8,12 @@ STAMP="$WORK_ROOT/.xtool-compiler-engine-rev"
 REVISION="clang-lld-swiftmodules-v6"
 KNOWN_GOOD_SHA256="5a5d08891aa712661eb602296e4d64acb41b67c0bbccb12c2cd9d9ab186aabfa"
 IPA_MEMBER="Payload/XToolMobileApp.app/Frameworks/libXToolCompilerEngine.dylib"
-REPO_ZIP="$ROOT/Artifacts/compiler-engine/libXToolCompilerEngine.dylib.zip"
+REPO_ZIP_PRIMARY="$ROOT/Artifacts/libXToolCompilerEngine.dylib.zip"
+REPO_ZIP_LEGACY="$ROOT/Artifacts/compiler-engine/libXToolCompilerEngine.dylib.zip"
 
 mkdir -p "$(dirname "$ENGINE")"
 
-python3 - "$ROOT" "$ENGINE" "$STAMP" "$REVISION" "$KNOWN_GOOD_SHA256" "$IPA_MEMBER" "$REPO_ZIP" "${1:-}" <<'PY'
+python3 - "$ROOT" "$ENGINE" "$STAMP" "$REVISION" "$KNOWN_GOOD_SHA256" "$IPA_MEMBER" "$REPO_ZIP_PRIMARY" "$REPO_ZIP_LEGACY" "${1:-}" <<'PY'
 from __future__ import annotations
 
 from pathlib import Path
@@ -29,8 +30,9 @@ stamp = Path(sys.argv[3])
 revision = sys.argv[4]
 known_good_sha = sys.argv[5].lower()
 ipa_member = sys.argv[6]
-repo_zip = Path(sys.argv[7])
-explicit = sys.argv[8]
+repo_zip_primary = Path(sys.argv[7])
+repo_zip_legacy = Path(sys.argv[8])
+explicit = sys.argv[9]
 
 
 def valid_macho_dylib(path: Path) -> tuple[bool, str]:
@@ -129,8 +131,12 @@ if explicit:
         raise SystemExit(0)
     raise SystemExit(1)
 
-# Preferred path: a compressed backup tracked with the repository.
-if extract_zip_member(repo_zip, ["libXToolCompilerEngine.dylib"], "repo backup ZIP"):
+# Preferred path: compressed backup tracked directly under Artifacts/.
+if extract_zip_member(repo_zip_primary, ["libXToolCompilerEngine.dylib"], "repo backup ZIP"):
+    raise SystemExit(0)
+
+# Backward-compatible path used by the earlier recovery layout.
+if extract_zip_member(repo_zip_legacy, ["libXToolCompilerEngine.dylib"], "legacy repo backup ZIP"):
     raise SystemExit(0)
 
 # Fallback path: recover from any known-good XTool IPA under Artifacts/.
@@ -144,6 +150,6 @@ for ipa in candidates:
     if extract_zip_member(ipa, [ipa_member], str(ipa)):
         raise SystemExit(0)
 
-print("No known-good compiler engine backup found in the repo ZIP or Artifacts/ IPAs.")
+print("No known-good compiler engine backup found in Artifacts/ or available backup IPAs.")
 raise SystemExit(1)
 PY
