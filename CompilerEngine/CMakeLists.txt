@@ -18,6 +18,10 @@ if(NOT TARGET lldMachO)
   message(FATAL_ERROR "XToolCompilerEngine requires the LLD lldMachO target. Reconfigure the existing LLVM graph with LLVM_ENABLE_PROJECTS=clang;lld.")
 endif()
 
+if(NOT TARGET lldCOFF)
+  message(FATAL_ERROR "XToolCompilerEngine requires the LLD lldCOFF target for Windows PE linking. Reconfigure the existing LLVM graph with LLVM_ENABLE_PROJECTS=clang;lld.")
+endif()
+
 # We configure the iOS target from a Linux host. LLVM's generic host options
 # treat CMAKE_SYSTEM_NAME=iOS as non-Darwin in a few places, which can leak the
 # ELF-only -Wl,-z,defs flag into shared-library links. Strip that flag only in
@@ -64,9 +68,9 @@ target_include_directories(XToolCompilerEngine PRIVATE
 target_compile_features(XToolCompilerEngine PRIVATE cxx_std_17)
 
 # Force this marker so an existing preserved CMake cache cannot keep reporting
-# the older C++-only engine identity after the swiftCompilerModules relink.
+# an older engine identity after the COFF driver / X86 backend expansion.
 set(XTOOL_COMPILER_ENGINE_VERSION
-  "swift-6.3.2-RELEASE+clang+lld+swiftmodules"
+  "swift-6.3.2-RELEASE+clang+lld-macho+lld-coff+aarch64+x86+swiftmodules"
   CACHE STRING
   "Version string reported by the embedded XTool compiler engine"
   FORCE
@@ -80,6 +84,7 @@ target_link_libraries(XToolCompilerEngine PRIVATE
   swiftCompilerModules
   clangFrontendTool
   lldMachO
+  lldCOFF
   lldCommon
 )
 
