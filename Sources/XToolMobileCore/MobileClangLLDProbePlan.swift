@@ -1,11 +1,11 @@
 import Foundation
 
-/// A tiny C -> object -> Mach-O bootstrap used to prove that the embedded
-/// Clang frontend and Mach-O LLD driver can both execute inside XTool Mobile.
+/// A tiny C -> COFF object -> PE64 bootstrap used to prove that the embedded
+/// Clang frontend and Windows COFF LLD driver can execute inside XTool Mobile.
 ///
-/// The probe deliberately avoids SDK headers and libc calls. That keeps it
-/// independent from the Swift standard-library compatibility work and exercises
-/// only native C code generation plus Darwin linking.
+/// The probe deliberately avoids Windows SDK headers, the CRT, and default
+/// libraries. Its optimized entry point should be only `mov eax, 42; ret`,
+/// which is also a useful compiler-produced input for WinPad.
 public struct MobileClangLLDProbePlan: Sendable, Hashable {
     public let sourceURL: URL
     public let objectURL: URL
@@ -21,6 +21,9 @@ public struct MobileClangLLDProbePlan: Sendable, Hashable {
         deploymentTarget: String = "16.0",
         fileManager: FileManager = .default
     ) throws -> Self {
+        // Keep the existing toolchain gate because the bootstrap UI already
+        // prepares the bundled compiler runtime through it. This Windows probe
+        // itself does not consume Apple SDK headers or libraries.
         try toolchain.validate(fileManager: fileManager)
         let sdk = try toolchain.iPhoneOSSDK(fileManager: fileManager)
         try fileManager.createDirectory(
@@ -28,15 +31,14 @@ public struct MobileClangLLDProbePlan: Sendable, Hashable {
             withIntermediateDirectories: true
         )
 
-        let source = workspace.appendingPathComponent("Hello.c")
-        let object = workspace.appendingPathComponent("HelloC.o")
-        let executable = workspace.appendingPathComponent("HelloC")
-        let target = "arm64-apple-ios\(deploymentTarget)"
-        let sdkVersion = parsedSDKVersion(from: sdk) ?? deploymentTarget
+        let source = workspace.appendingPathComponent("HelloWin.c")
+        let object = workspace.appendingPathComponent("HelloWin.obj")
+        let executable = workspace.appendingPathComponent("HelloWin.exe")
+        let target = "x86_64-pc-windows-msvc"
 
         let sourceText = """
         int main(void) {
-            return 0;
+            return 42;
         }
         """
         try Data(sourceText.utf8).write(to: source, options: .atomic)
@@ -45,24 +47,27 @@ public struct MobileClangLLDProbePlan: Sendable, Hashable {
 
         // CompilerInvocation::CreateFromArgs consumes cc1-style arguments; the
         // native bridge supplies no argv[0] and callers must not pass `-cc1`.
+        // -O2 keeps this test intentionally tiny: `mov eax,42; ret` on x86-64.
         let clangArguments = [
             "-triple", target,
             "-emit-obj",
+            "-O2",
+            "-ffreestanding",
+            "-fno-stack-protector",
             "-x", "c",
             source.path,
             "-o", object.path,
         ]
 
-        // The native LLD bridge supplies argv[0] (`ld64.lld`). This object has
-        // no external references, so the link does not need libSystem or any
-        // startup object; an explicit _main entry point is sufficient to prove
-        // that LLD can emit an arm64 iOS Mach-O executable.
+        // No Windows SDK, CRT, import libraries, or startup objects are needed.
+        // lld-link enters `main` directly and emits a fixed AMD64 console PE64.
         let lldArguments = [
-            "-arch", "arm64",
-            "-platform_version", "ios", deploymentTarget, sdkVersion,
-            "-syslibroot", sdk.path,
-            "-e", "_main",
-            "-o", executable.path,
+            "/machine:x64",
+            "/subsystem:console",
+            "/entry:main",
+            "/nodefaultlib",
+            "/fixed",
+            "/out:\(executable.path)",
             object.path,
         ]
 
@@ -75,13 +80,5 @@ public struct MobileClangLLDProbePlan: Sendable, Hashable {
             clangArguments: clangArguments,
             lldArguments: lldArguments
         )
-    }
-
-    private static func parsedSDKVersion(from sdkURL: URL) -> String? {
-        let base = sdkURL.deletingPathExtension().lastPathComponent
-        let prefix = "iPhoneOS"
-        guard base.hasPrefix(prefix) else { return nil }
-        let version = String(base.dropFirst(prefix.count))
-        return version.isEmpty ? nil : version
     }
 }
