@@ -1,11 +1,16 @@
 # Isolated Windows backend for XTool Mobile.
 #
-# This external LLVM project intentionally excludes Swift and Mach-O LLD. The
-# dylib itself is arm64 iOS code, while LLVM_TARGETS_TO_BUILD=X86 gives Clang the
-# x86/x86-64 code generator needed for Windows COFF objects.
+# The main XTool compiler engine already contains Clang. For Windows jobs it
+# emits target-neutral LLVM bitcode first; this smaller dylib only lowers that
+# bitcode through LLVM's X86 backend and links the resulting COFF object with
+# lldCOFF. No Swift project and no second Clang frontend are built here.
 
-if(NOT TARGET clangFrontendTool)
-  message(FATAL_ERROR "XToolWindowsBackend requires clangFrontendTool")
+if(NOT TARGET LLVMX86CodeGen)
+  message(FATAL_ERROR "XToolWindowsBackend requires LLVM's X86 code generator")
+endif()
+
+if(NOT TARGET LLVMBitReader)
+  message(FATAL_ERROR "XToolWindowsBackend requires LLVMBitReader")
 endif()
 
 if(NOT TARGET lldCOFF)
@@ -38,8 +43,6 @@ target_include_directories(XToolWindowsBackend PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/include"
   "${LLVM_MAIN_INCLUDE_DIR}"
   "${LLVM_BINARY_DIR}/include"
-  "${LLVM_MAIN_SRC_DIR}/../clang/include"
-  "${LLVM_BINARY_DIR}/tools/clang/include"
   "${LLVM_MAIN_SRC_DIR}/../lld/include"
   "${LLVM_BINARY_DIR}/tools/lld/include"
 )
@@ -47,7 +50,7 @@ target_include_directories(XToolWindowsBackend PRIVATE
 target_compile_features(XToolWindowsBackend PRIVATE cxx_std_17)
 
 set(XTOOL_WINDOWS_BACKEND_VERSION
-  "swift-6.3.2-RELEASE+clang+x86+lld-coff"
+  "swift-6.3.2-RELEASE+llvm-bitcode+x86+lld-coff"
   CACHE STRING
   "Version string reported by the XTool Windows backend"
   FORCE
@@ -57,7 +60,11 @@ target_compile_definitions(XToolWindowsBackend PRIVATE
 )
 
 target_link_libraries(XToolWindowsBackend PRIVATE
-  clangFrontendTool
+  LLVMX86CodeGen
+  LLVMBitReader
+  LLVMCore
+  LLVMTargetParser
+  LLVMSupport
   lldCOFF
   lldCommon
 )
