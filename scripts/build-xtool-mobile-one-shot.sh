@@ -120,7 +120,7 @@ run_all() {
   if [[ ! -s "$ENGINE" ]]; then
     echo '=== compiler engine recovery ==='
     if bash scripts/restore-compiler-engine-from-ipa.sh; then
-      echo 'Recovered known-good compiler engine from backup IPA.'
+      echo 'Recovered known-good compiler engine from repository/IPA backup.'
     else
       echo 'No recoverable compiler engine backup found; normal compiler build path remains available.'
     fi
