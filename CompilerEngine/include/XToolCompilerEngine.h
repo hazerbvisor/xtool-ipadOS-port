@@ -21,6 +21,11 @@ int32_t xtool_clang_frontend_run(int32_t argc, const char *const *argv);
 /// (`ld64.lld`) before entering lldMain.
 int32_t xtool_lld_macho_run(int32_t argc, const char *const *argv);
 
+/// Run LLD's Windows/COFF linker in-process.
+/// argv contains ordinary lld-link arguments. The bridge supplies argv[0]
+/// (`lld-link`) before entering lldMain.
+int32_t xtool_lld_coff_run(int32_t argc, const char *const *argv);
+
 /// Human-readable compiler engine build/version string.
 const char *xtool_compiler_engine_version(void);
 
