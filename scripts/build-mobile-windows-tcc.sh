@@ -158,6 +158,7 @@ build_backend() {
   "$CLANG" "${common[@]}" \
     -I"$GEN_ROOT" \
     -I"$TCC_SRC" \
+    -include "$ROOT/WindowsTCCBackend/iOSHostCompat.h" \
     -DONE_SOURCE=1 \
     -DTCC_TARGET_X86_64=1 \
     -DTCC_TARGET_PE=1 \
