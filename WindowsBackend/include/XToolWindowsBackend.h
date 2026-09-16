@@ -6,9 +6,12 @@
 extern "C" {
 #endif
 
-/// Run the Windows-focused Clang cc1 frontend in-process.
-/// argv contains cc1-style arguments with no argv[0] and no `-cc1` marker.
-int32_t xtool_windows_clang_run(int32_t argc, const char *const *argv);
+/// Lower LLVM bitcode produced by the main XTool Clang frontend into an
+/// x86_64 Windows COFF object.
+/// argv[0] = input .bc path
+/// argv[1] = output .obj path
+/// argv[2] = optional target triple (defaults to x86_64-pc-windows-msvc)
+int32_t xtool_windows_codegen_run(int32_t argc, const char *const *argv);
 
 /// Run LLD's Windows COFF/PE driver in-process.
 /// argv contains ordinary lld-link style arguments; the bridge supplies argv[0].
