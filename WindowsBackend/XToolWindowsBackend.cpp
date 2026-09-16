@@ -1,18 +1,28 @@
 #include "XToolWindowsBackend.h"
 
-#include "clang/Frontend/CompilerInstance.h"
-#include "clang/Frontend/CompilerInvocation.h"
-#include "clang/FrontendTool/Utils.h"
 #include "lld/Common/Driver.h"
-#include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/Bitcode/BitcodeReader.h"
+#include "llvm/IR/LegacyPassManager.h"
+#include "llvm/IR/LLVMContext.h"
+#include "llvm/IR/Module.h"
+#include "llvm/MC/TargetRegistry.h"
+#include "llvm/Support/CodeGen.h"
+#include "llvm/Support/Error.h"
+#include "llvm/Support/FileSystem.h"
+#include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/TargetSelect.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/Target/TargetMachine.h"
+#include "llvm/Target/TargetOptions.h"
+#include "llvm/TargetParser/Triple.h"
 
 #include <atomic>
 #include <cstddef>
 #include <memory>
 #include <mutex>
+#include <optional>
+#include <string>
 
 #ifndef XTOOL_WINDOWS_BACKEND_VERSION
 #define XTOOL_WINDOWS_BACKEND_VERSION "windows-backend"
@@ -25,17 +35,115 @@ namespace {
 void initializeX86TargetsOnce() {
     static std::once_flag once;
     std::call_once(once, [] {
-        // This dylib is compiled for arm64 iOS, but its LLVM build contains the
-        // X86 target backend so Clang can emit x86_64 Windows objects.
+        // Only X86 is built into this dylib. InitializeAll* therefore registers
+        // just the x86/x86-64 backend while the dylib itself remains arm64 iOS.
         llvm::InitializeAllTargetInfos();
         llvm::InitializeAllTargets();
         llvm::InitializeAllTargetMCs();
         llvm::InitializeAllAsmPrinters();
-        llvm::InitializeAllAsmParsers();
     });
 }
 
 std::atomic<bool> gLLDCanRunAgain{true};
+
+int32_t emitCOFFObject(
+    const char *inputPath,
+    const char *outputPath,
+    const char *tripleText
+) {
+    if (inputPath == nullptr || outputPath == nullptr) {
+        return 64;
+    }
+
+    initializeX86TargetsOnce();
+
+    const std::string tripleString =
+        (tripleText != nullptr && tripleText[0] != '\0')
+            ? tripleText
+            : "x86_64-pc-windows-msvc";
+    const llvm::Triple triple(tripleString);
+
+    auto bufferOrError = llvm::MemoryBuffer::getFile(inputPath);
+    if (!bufferOrError) {
+        llvm::errs() << "xtool-windows: could not read bitcode: "
+                     << bufferOrError.getError().message() << "\n";
+        return 66;
+    }
+
+    llvm::LLVMContext context;
+    auto moduleOrError = llvm::parseBitcodeFile(
+        (*bufferOrError)->getMemBufferRef(),
+        context
+    );
+    if (!moduleOrError) {
+        llvm::logAllUnhandledErrors(
+            moduleOrError.takeError(),
+            llvm::errs(),
+            "xtool-windows: invalid LLVM bitcode: "
+        );
+        return 65;
+    }
+
+    std::unique_ptr<llvm::Module> module = std::move(*moduleOrError);
+    module->setTargetTriple(triple);
+
+    std::string lookupError;
+    const llvm::Target *target = llvm::TargetRegistry::lookupTarget(
+        triple.getTriple(),
+        lookupError
+    );
+    if (target == nullptr) {
+        llvm::errs() << "xtool-windows: X86 target lookup failed: "
+                     << lookupError << "\n";
+        return 69;
+    }
+
+    llvm::TargetOptions options;
+    std::unique_ptr<llvm::TargetMachine> targetMachine(
+        target->createTargetMachine(
+            triple,
+            "generic",
+            "",
+            options,
+            std::nullopt,
+            std::nullopt,
+            llvm::CodeGenOptLevel::Default,
+            false
+        )
+    );
+    if (!targetMachine) {
+        llvm::errs() << "xtool-windows: could not create x86_64 TargetMachine\n";
+        return 70;
+    }
+
+    module->setDataLayout(targetMachine->createDataLayout());
+
+    std::error_code outputError;
+    llvm::raw_fd_ostream output(
+        outputPath,
+        outputError,
+        llvm::sys::fs::OF_None
+    );
+    if (outputError) {
+        llvm::errs() << "xtool-windows: could not create COFF object: "
+                     << outputError.message() << "\n";
+        return 73;
+    }
+
+    llvm::legacy::PassManager passes;
+    if (targetMachine->addPassesToEmitFile(
+            passes,
+            output,
+            nullptr,
+            llvm::CodeGenFileType::ObjectFile)) {
+        llvm::errs() << "xtool-windows: X86 backend cannot emit object files\n";
+        return 70;
+    }
+
+    passes.run(*module);
+    output.flush();
+    return 0;
+}
 
 int32_t runCOFFLLD(int32_t argc, const char *const *argv) {
     if (argc < 0 || (argc > 0 && argv == nullptr)) {
@@ -72,35 +180,16 @@ int32_t runCOFFLLD(int32_t argc, const char *const *argv) {
 
 } // namespace
 
-extern "C" int32_t xtool_windows_clang_run(
+extern "C" int32_t xtool_windows_codegen_run(
     int32_t argc,
     const char *const *argv
 ) {
-    if (argc < 0 || (argc > 0 && argv == nullptr)) {
+    if (argc < 2 || argv == nullptr) {
         return 64;
     }
 
-    initializeX86TargetsOnce();
-
-    auto invocation = std::make_shared<clang::CompilerInvocation>();
-    clang::CompilerInstance compiler(invocation);
-
-    compiler.createDiagnostics();
-    if (!compiler.hasDiagnostics()) {
-        return 70;
-    }
-
-    llvm::ArrayRef<const char *> arguments(argv, static_cast<size_t>(argc));
-    if (!clang::CompilerInvocation::CreateFromArgs(
-            *invocation,
-            arguments,
-            compiler.getDiagnostics(),
-            "xtool-windows-clang")) {
-        return 1;
-    }
-
-    compiler.createVirtualFileSystem();
-    return clang::ExecuteCompilerInvocation(&compiler) ? 0 : 1;
+    const char *triple = argc >= 3 ? argv[2] : "x86_64-pc-windows-msvc";
+    return emitCOFFObject(argv[0], argv[1], triple);
 }
 
 extern "C" int32_t xtool_windows_lld_coff_run(
