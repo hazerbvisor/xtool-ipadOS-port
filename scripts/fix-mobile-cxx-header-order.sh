@@ -81,25 +81,23 @@ else:
 # SDK headers depend on those macros; without them sys/cdefs.h treats the
 # compiler as unsupported and strict C++ can set __DARWIN_NO_LONG_LONG=1,
 # hiding lldiv_t/lldiv from libc++.
-gnuc_flag = '                            "-fgnuc-version=4.2.1",\n'
-if gnuc_flag not in text:
-    old_args = '''                        "-pic-level", "2",
-                        "-fblocks",
-                        "-O0",
-'''
-    new_args = '''                        "-pic-level", "2",
-                        "-fblocks",
-                        // Match the normal Clang driver's Darwin/GCC compatibility
-                        // macros (__GNUC__, __GNUG__, etc.) for Apple SDK headers.
-                        "-fgnuc-version=4.2.1",
-                        "-O0",
-'''
-    count = text.count(old_args)
+# Detect the flag semantically so comments/indentation changes do not make an
+# already-patched source look unpatched.
+gnuc_marker = '"-fgnuc-version=4.2.1",'
+if gnuc_marker not in text:
+    fblocks_marker = '                        "-fblocks",\n'
+    count = text.count(fblocks_marker)
     if count != 1:
         raise SystemExit(
-            f"Expected exactly one native Clang argument block, found {count}; refusing to patch."
+            f"Expected exactly one native Clang -fblocks argument, found {count}; refusing to patch."
         )
-    text = text.replace(old_args, new_args, 1)
+    insertion = (
+        fblocks_marker
+        + '                        // Match the normal Clang driver\'s Darwin/GCC compatibility\n'
+        + '                        // macros (__GNUC__, __GNUG__, etc.) for Apple SDK headers.\n'
+        + '                        "-fgnuc-version=4.2.1",\n'
+    )
+    text = text.replace(fblocks_marker, insertion, 1)
     changed = True
     print("Enabled Clang GNU compatibility macros with -fgnuc-version=4.2.1.")
 else:
