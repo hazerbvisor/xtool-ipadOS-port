@@ -37,4 +37,4 @@ chmod +x "$GENERATED_SCRIPT"
 
 echo "Phase 20 compiler engine: enabling LLVM targets AArch64 + X86"
 echo "mode: $MODE"
-exec bash "$GENERATED_SCRIPT" "$MODE"
+bash "$GENERATED_SCRIPT" "$MODE"
