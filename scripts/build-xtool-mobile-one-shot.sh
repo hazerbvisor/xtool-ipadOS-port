@@ -117,18 +117,21 @@ run_all() {
   bash scripts/fix-mobile-cxx-header-order.sh
   echo
 
+  if [[ ! -s "$ENGINE" ]]; then
+    echo '=== compiler engine recovery ==='
+    if bash scripts/restore-compiler-engine-from-ipa.sh; then
+      echo 'Recovered known-good compiler engine from backup IPA.'
+    else
+      echo 'No recoverable compiler engine backup found; normal compiler build path remains available.'
+    fi
+    echo
+  fi
+
   echo '=== mobile project pipeline checks ==='
   bash scripts/test-mobile-project.sh
   echo
 
-  if compiler_graph_is_usable && ! compiler_graph_has_clang_lld; then
-    echo 'error: the preserved compiler graph predates the Clang + LLD bootstrap.' >&2
-    echo 'Run this cache-preserving upgrade once:' >&2
-    echo '  XTOOL_COMPILER_JOBS=3 bash scripts/bootstrap-mobile-clang-lld.sh' >&2
-    return 2
-  fi
-
-  if compiler_engine_is_current && compiler_graph_has_clang_lld; then
+  if compiler_engine_is_current; then
     echo '=== compiler engine ==='
     echo "cache hit: compiler engine revision $COMPILER_ENGINE_REV"
     file "$ENGINE" 2>/dev/null || true
@@ -141,6 +144,13 @@ run_all() {
     file "$ENGINE" 2>/dev/null || true
     ls -lh "$ENGINE"
   else
+    if compiler_graph_is_usable && ! compiler_graph_has_clang_lld; then
+      echo 'error: the preserved compiler graph predates the Clang + LLD bootstrap.' >&2
+      echo 'Run this cache-preserving upgrade once:' >&2
+      echo '  XTOOL_COMPILER_JOBS=3 bash scripts/bootstrap-mobile-clang-lld.sh' >&2
+      return 2
+    fi
+
     if compiler_graph_is_usable; then
       echo '=== compiler configure ==='
       if compiler_config_is_current; then
