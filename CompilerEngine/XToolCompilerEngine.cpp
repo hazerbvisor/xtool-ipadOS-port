@@ -20,7 +20,6 @@
 #define XTOOL_COMPILER_ENGINE_VERSION "swift-frontend-engine"
 #endif
 
-LLD_HAS_DRIVER(coff)
 LLD_HAS_DRIVER(macho)
 
 namespace {
@@ -38,36 +37,31 @@ void initializeClangTargetsOnce() {
 void initializeSwiftCompilerModulesOnce() {
     static std::once_flag once;
     std::call_once(once, [] {
-        // The real swift-frontend driver always performs this registration
-        // before dispatching to performFrontend(). FrontendTool deliberately
-        // does not do it itself because that library is also linked by tools
-        // that do not embed Swift compiler modules.
         initializeSwiftModules();
     });
 }
 
 std::atomic<bool> gLLDCanRunAgain{true};
 
-int32_t runLLD(
-    int32_t argc,
-    const char *const *argv,
-    const char *driverName,
-    lld::DriverDef driver
-) {
+int32_t runMachOLLD(int32_t argc, const char *const *argv) {
     if (argc < 0 || (argc > 0 && argv == nullptr)) {
         return 64;
     }
 
     if (!gLLDCanRunAgain.load(std::memory_order_acquire)) {
-        llvm::errs() << "xtool: embedded LLD cannot safely be re-entered after the previous link\n";
+        llvm::errs() << "xtool: embedded Mach-O LLD cannot safely be re-entered after the previous link\n";
         return 70;
     }
 
     llvm::SmallVector<const char *, 32> arguments;
-    arguments.push_back(driverName);
-    arguments.append(argv, argv + static_cast<size_t>(argc));
+    arguments.push_back("ld64.lld");
+    if (argc > 0) {
+        arguments.append(argv, argv + static_cast<size_t>(argc));
+    }
 
-    const lld::DriverDef drivers[] = {driver};
+    const lld::DriverDef drivers[] = {
+        {lld::Darwin, &lld::macho::link}
+    };
     const lld::Result result = lld::lldMain(
         arguments,
         llvm::outs(),
@@ -80,12 +74,6 @@ int32_t runLLD(
     }
 
     return static_cast<int32_t>(result.retCode);
-}
-
-bool looksLikeCOFFLink(int32_t argc, const char *const *argv) {
-    // XTool's bootstrap probe uses native lld-link syntax. Mach-O/ld64
-    // arguments begin with '-', while COFF driver options begin with '/'.
-    return argc > 0 && argv != nullptr && argv[0] != nullptr && argv[0][0] == '/';
 }
 
 } // namespace
@@ -105,10 +93,6 @@ extern "C" int32_t xtool_swift_frontend_run(
         swift::performFrontend(arguments, "xtool-mobile", nullptr, nullptr)
     );
 
-    // FrontendTool normally exits the process after special-mode queries such
-    // as -print-target-info, so LLVM's buffered raw streams are flushed by
-    // process teardown. XTool keeps the compiler image alive in-process; flush
-    // explicitly while stdout/stderr are still redirected by the Swift bridge.
     llvm::outs().flush();
     llvm::errs().flush();
 
@@ -128,9 +112,6 @@ extern "C" int32_t xtool_clang_frontend_run(
     auto invocation = std::make_shared<clang::CompilerInvocation>();
     clang::CompilerInstance compiler(invocation);
 
-    // Create a diagnostics engine before parsing the cc1 argument list so
-    // malformed frontend options are reported through stderr and therefore
-    // captured by XToolMobileCore.
     compiler.createDiagnostics();
     if (!compiler.hasDiagnostics()) {
         return 70;
@@ -154,36 +135,7 @@ extern "C" int32_t xtool_lld_macho_run(
     int32_t argc,
     const char *const *argv
 ) {
-    // Backwards-compatible bootstrap dispatch: existing XTool UI calls this
-    // entry point for the native linker probe. If it receives lld-link style
-    // '/' options, route them to COFF; ordinary '-' ld64 options remain Mach-O.
-    if (looksLikeCOFFLink(argc, argv)) {
-        return runLLD(
-            argc,
-            argv,
-            "lld-link",
-            {lld::WinLink, &lld::coff::link}
-        );
-    }
-
-    return runLLD(
-        argc,
-        argv,
-        "ld64.lld",
-        {lld::Darwin, &lld::macho::link}
-    );
-}
-
-extern "C" int32_t xtool_lld_coff_run(
-    int32_t argc,
-    const char *const *argv
-) {
-    return runLLD(
-        argc,
-        argv,
-        "lld-link",
-        {lld::WinLink, &lld::coff::link}
-    );
+    return runMachOLLD(argc, argv);
 }
 
 extern "C" const char *xtool_compiler_engine_version(void) {
