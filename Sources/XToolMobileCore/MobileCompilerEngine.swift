@@ -7,7 +7,7 @@ import Glibc
 #endif
 
 /// Loads the optional compiler engine bundled inside XTool Mobile and invokes
-/// Swift, Clang and Mach-O LLD through a small stable C ABI.
+/// Swift, Clang and LLD through a small stable C ABI.
 ///
 /// Keeping the heavy compiler implementation behind a dylib means the app, UI
 /// and build planner can be rebuilt independently from the compiler itself.
@@ -24,6 +24,7 @@ public final class MobileCompilerEngine: MobileProjectCompiler, @unchecked Senda
     private let runFrontendFunction: NativeRun
     private let runClangFunction: NativeRun?
     private let runLLDMachOFunction: NativeRun?
+    private let runLLDCOFFFunction: NativeRun?
     public let location: URL
     public let version: String
 
@@ -32,6 +33,7 @@ public final class MobileCompilerEngine: MobileProjectCompiler, @unchecked Senda
         runFrontendFunction: @escaping NativeRun,
         runClangFunction: NativeRun?,
         runLLDMachOFunction: NativeRun?,
+        runLLDCOFFFunction: NativeRun?,
         location: URL,
         version: String
     ) {
@@ -39,6 +41,7 @@ public final class MobileCompilerEngine: MobileProjectCompiler, @unchecked Senda
         self.runFrontendFunction = runFrontendFunction
         self.runClangFunction = runClangFunction
         self.runLLDMachOFunction = runLLDMachOFunction
+        self.runLLDCOFFFunction = runLLDCOFFFunction
         self.location = location
         self.version = version
     }
@@ -53,6 +56,10 @@ public final class MobileCompilerEngine: MobileProjectCompiler, @unchecked Senda
 
     public var supportsMachOLLD: Bool {
         runLLDMachOFunction != nil
+    }
+
+    public var supportsCOFFLLD: Bool {
+        runLLDCOFFFunction != nil
     }
 
     public static func loadFromApplicationBundle(
@@ -84,6 +91,9 @@ public final class MobileCompilerEngine: MobileProjectCompiler, @unchecked Senda
             let runLLDMachO: NativeRun? = dlsym(handle, "xtool_lld_macho_run").map {
                 unsafeBitCast($0, to: NativeRun.self)
             }
+            let runLLDCOFF: NativeRun? = dlsym(handle, "xtool_lld_coff_run").map {
+                unsafeBitCast($0, to: NativeRun.self)
+            }
 
             var version = "unknown"
             if let versionSymbol = dlsym(handle, "xtool_compiler_engine_version") {
@@ -98,6 +108,7 @@ public final class MobileCompilerEngine: MobileProjectCompiler, @unchecked Senda
                 runFrontendFunction: runFrontend,
                 runClangFunction: runClang,
                 runLLDMachOFunction: runLLDMachO,
+                runLLDCOFFFunction: runLLDCOFF,
                 location: location,
                 version: version
             )
@@ -163,6 +174,22 @@ public final class MobileCompilerEngine: MobileProjectCompiler, @unchecked Senda
         return try runNative(
             arguments: arguments,
             function: runLLDMachOFunction,
+            diagnosticsURL: diagnosticsURL
+        )
+    }
+
+    /// Executes LLD's Windows COFF/PE driver in-process.
+    ///
+    /// Pass ordinary `lld-link` style arguments. The native bridge supplies the
+    /// synthetic argv[0] entry required by `lldMain`.
+    public func runCOFFLLD(arguments: [String], diagnosticsURL: URL? = nil) throws -> MobileBuildResult {
+        guard let runLLDCOFFFunction else {
+            throw MobileCompilerEngineError.missingSymbol("xtool_lld_coff_run")
+        }
+
+        return try runNative(
+            arguments: arguments,
+            function: runLLDCOFFFunction,
             diagnosticsURL: diagnosticsURL
         )
     }
