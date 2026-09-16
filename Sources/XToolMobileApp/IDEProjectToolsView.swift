@@ -102,6 +102,12 @@ struct IDEProjectToolsView: View {
     @State private var installedSDKs: [String] = []
     @State private var activeSDKName: String?
 
+    @State private var windowsProbeExecutable: URL?
+    @State private var windowsProbeInspection: MobileWindowsPEInspection?
+    @State private var windowsProbeEngineVersion = "Not checked"
+    @State private var windowsProbeSupportsClang = false
+    @State private var windowsProbeSupportsCOFF = false
+
     private var builds: URL {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Builds")
@@ -110,7 +116,7 @@ struct IDEProjectToolsView: View {
     var body: some View {
         VStack {
             Picker("Tools", selection: $tab) {
-                ForEach(["Files", "Search", "Builds", "SDK"], id: \.self) {
+                ForEach(["Files", "Search", "Builds", "SDK", "Windows"], id: \.self) {
                     Text($0).tag($0)
                 }
             }
@@ -233,8 +239,10 @@ struct IDEProjectToolsView: View {
                         }
                     }
                 }
-            } else {
+            } else if tab == "SDK" {
                 sdkTools
+            } else {
+                windowsCompilerTools
             }
 
             if busy { ProgressView() }
@@ -250,6 +258,7 @@ struct IDEProjectToolsView: View {
             tab = initialTab
             loadHistory()
             loadSDKStatus()
+            loadWindowsCompilerStatus()
         }
         .sheet(isPresented: $showingXIPImporter) {
             XIPDocumentPicker { result in
@@ -357,6 +366,52 @@ struct IDEProjectToolsView: View {
         }
     }
 
+    @ViewBuilder
+    private var windowsCompilerTools: some View {
+        Form {
+            Section("Windows x64 compiler gate") {
+                LabeledContent("Compiler engine", value: windowsProbeEngineVersion)
+                LabeledContent("Clang frontend", value: windowsProbeSupportsClang ? "Ready" : "Missing")
+                LabeledContent("COFF LLD", value: windowsProbeSupportsCOFF ? "Ready" : "Missing")
+
+                Button {
+                    runWindowsCompilerProbe()
+                } label: {
+                    Label("Build x64 HelloWindows.exe", systemImage: "pc")
+                }
+                .disabled(busy || !windowsProbeSupportsClang || !windowsProbeSupportsCOFF)
+
+                Text("Compiles a CRT-free C function for x86_64-pc-windows-msvc, then links it with the embedded lld-link driver. No Windows SDK, Visual Studio, MinGW, or Windows PC is required.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            if let inspection = windowsProbeInspection {
+                Section("PE32+ result") {
+                    LabeledContent("Machine", value: inspection.machine == 0x8664 ? "AMD64 · 0x8664" : "0x\(String(inspection.machine, radix: 16, uppercase: true))")
+                    LabeledContent("Format", value: inspection.optionalMagic == 0x20B ? "PE32+ · 0x20B" : "0x\(String(inspection.optionalMagic, radix: 16, uppercase: true))")
+                    LabeledContent("Sections", value: String(inspection.sectionCount))
+                    LabeledContent("Entry RVA", value: "0x\(String(inspection.entryRVA, radix: 16, uppercase: true))")
+                    LabeledContent("Entry section", value: inspection.entrySection)
+                    LabeledContent("File size", value: "\(inspection.fileSize) bytes")
+                    LabeledContent("Entry bytes", value: inspection.entryPreview)
+                    LabeledContent("WinPad Phase 17", value: inspection.phase17EntryCompatible ? "Compatible · MOV EAX,42; RET" : "Needs wider decoder")
+                }
+            }
+
+            if let windowsProbeExecutable {
+                Section("Output") {
+                    ShareLink(item: windowsProbeExecutable) {
+                        Label("Export HelloWindows.exe", systemImage: "square.and.arrow.up")
+                    }
+                    Text(windowsProbeExecutable.path)
+                        .font(.caption2.monospaced())
+                        .textSelection(.enabled)
+                }
+            }
+        }
+    }
+
     private func beginSDKImport(_ result: Result<[URL], Error>) {
         switch result {
         case .failure(let error):
@@ -426,6 +481,90 @@ struct IDEProjectToolsView: View {
         } catch {
             installedSDKs = []
             activeSDKName = nil
+        }
+    }
+
+    private func loadWindowsCompilerStatus() {
+        do {
+            let engine = try MobileCompilerEngine.loadFromApplicationBundle()
+            windowsProbeEngineVersion = engine.version
+            windowsProbeSupportsClang = engine.supportsClangFrontend
+            windowsProbeSupportsCOFF = engine.supportsCOFFLLD
+        } catch {
+            windowsProbeEngineVersion = "Unavailable"
+            windowsProbeSupportsClang = false
+            windowsProbeSupportsCOFF = false
+        }
+    }
+
+    private func runWindowsCompilerProbe() {
+        guard !busy else { return }
+        busy = true
+        windowsProbeExecutable = nil
+        windowsProbeInspection = nil
+        message = "Windows probe: loading compiler engine…"
+
+        Task {
+            do {
+                let engine = try MobileCompilerEngine.loadFromApplicationBundle()
+                windowsProbeEngineVersion = engine.version
+                windowsProbeSupportsClang = engine.supportsClangFrontend
+                windowsProbeSupportsCOFF = engine.supportsCOFFLLD
+                guard engine.supportsClangFrontend else {
+                    throw MobileCompilerEngineError.missingSymbol("xtool_clang_frontend_run")
+                }
+                guard engine.supportsCOFFLLD else {
+                    throw MobileCompilerEngineError.missingSymbol("xtool_lld_coff_run")
+                }
+
+                guard let applicationSupport = FileManager.default.urls(
+                    for: .applicationSupportDirectory,
+                    in: .userDomainMask
+                ).first else {
+                    throw MobileProjectBuildError.invalid("Application Support directory is unavailable")
+                }
+                let workspace = applicationSupport
+                    .appendingPathComponent("WindowsCompilerProbe", isDirectory: true)
+                let plan = try MobileWindowsCOFFProbePlan.helloReturn42(workspace: workspace)
+
+                message = "Windows probe: Clang → x86_64 COFF object…"
+                let clangResult = try await Task.detached {
+                    try engine.runClangFrontend(arguments: plan.clangArguments)
+                }.value
+                guard clangResult.succeeded else {
+                    let diagnostics = String(data: clangResult.standardError, encoding: .utf8) ?? ""
+                    throw MobileProjectBuildError.invalid(
+                        "Windows Clang failed (\(clangResult.exitCode)): \(diagnostics)"
+                    )
+                }
+                guard FileManager.default.fileExists(atPath: plan.objectURL.path) else {
+                    throw MobileProjectBuildError.invalid("Clang returned success but HelloWindows.obj is missing")
+                }
+
+                message = "Windows probe: COFF LLD → PE32+ executable…"
+                let lldResult = try await Task.detached {
+                    try engine.runCOFFLLD(arguments: plan.lldArguments)
+                }.value
+                guard lldResult.succeeded else {
+                    let diagnostics = String(data: lldResult.standardError, encoding: .utf8) ?? ""
+                    throw MobileProjectBuildError.invalid(
+                        "COFF LLD failed (\(lldResult.exitCode)): \(diagnostics)"
+                    )
+                }
+                guard FileManager.default.fileExists(atPath: plan.executableURL.path) else {
+                    throw MobileProjectBuildError.invalid("lld-link returned success but HelloWindows.exe is missing")
+                }
+
+                let inspection = try plan.inspectExecutable()
+                windowsProbeInspection = inspection
+                windowsProbeExecutable = plan.executableURL
+                message = inspection.phase17EntryCompatible
+                    ? "Windows compiler SUCCESS — genuine AMD64 PE32+ built on-device; entry is already WinPad Phase 17 compatible."
+                    : "Windows compiler SUCCESS — genuine AMD64 PE32+ built on-device; entry needs wider WinPad instruction coverage."
+            } catch {
+                message = "Windows compiler probe failed: \(String(describing: error))"
+            }
+            busy = false
         }
     }
 
