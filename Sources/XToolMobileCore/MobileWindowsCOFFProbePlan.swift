@@ -93,8 +93,10 @@ public struct MobileWindowsPEInspection: Sendable, Hashable {
     public init(url: URL) throws {
         let data = try Data(contentsOf: url, options: [.mappedIfSafe])
 
-        func require(_ condition: @autoclosure () -> Bool, _ message: String) throws {
-            if !condition() { throw MobileWindowsPEInspectionError.invalidPE(message) }
+        func require(_ condition: @autoclosure () throws -> Bool, _ message: String) throws {
+            guard try condition() else {
+                throw MobileWindowsPEInspectionError.invalidPE(message)
+            }
         }
         func u16(_ offset: Int) throws -> UInt16 {
             try require(offset >= 0 && offset + 2 <= data.count, "u16 outside file")
@@ -140,13 +142,14 @@ public struct MobileWindowsPEInspection: Sendable, Hashable {
             let rawSize = try u32(section + 16)
             let rawPointer = try u32(section + 20)
             let span = max(virtualSize, rawSize)
-            if entryRVA >= virtualAddress && entryRVA < virtualAddress &+ span {
+            let sectionEnd = UInt64(virtualAddress) + UInt64(span)
+            if UInt64(entryRVA) >= UInt64(virtualAddress) && UInt64(entryRVA) < sectionEnd {
                 let delta = entryRVA - virtualAddress
                 try require(delta < rawSize, "entry point is not backed by raw section data")
-                let offset = Int(rawPointer &+ delta)
-                try require(offset >= 0 && offset < data.count, "entry point outside file")
+                let fileOffset64 = UInt64(rawPointer) + UInt64(delta)
+                try require(fileOffset64 < UInt64(data.count), "entry point outside file")
                 foundName = name
-                entryFileOffset = offset
+                entryFileOffset = Int(fileOffset64)
                 break
             }
         }
