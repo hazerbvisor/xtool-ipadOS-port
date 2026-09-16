@@ -31,8 +31,8 @@
     "UIKit"
   ],
   "infoPlist": "XToolMobileInfo.plist",
-  "shortVersion": "1.0.2",
-  "buildVersion": "3",
+  "shortVersion": "1.0.3",
+  "buildVersion": "4",
   "reuseCompilerEngine": true,
   "reuseBundledRuntime": true
 }
