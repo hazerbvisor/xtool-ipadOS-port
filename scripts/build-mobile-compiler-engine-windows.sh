@@ -1,72 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Phase 20 compiler-engine wrapper.
+# Deprecated Phase 20 compatibility wrapper.
 #
-# The normal mobile engine intentionally builds only LLVM's AArch64 backend to
-# keep the dylib smaller. WinPad Phase 20 also needs Clang to emit x86_64 COFF,
-# so this wrapper reuses the known-good build script with X86 enabled alongside
-# AArch64 without permanently changing the normal build path.
-#
-# LLD's standalone tool target is also disabled here. The mobile compiler engine
-# embeds lldCOFF/lldMachO as libraries and calls them through the stable C ABI;
-# building/installing the standalone `lld` executable under CMAKE_SYSTEM_NAME=iOS
-# makes CMake treat it as a MACOSX_BUNDLE and fails because no bundle destination
-# is provided.
-#
-# IMPORTANT: unlike the base configure script, this wrapper preserves BUILD_ROOT
-# so an existing AArch64/Swift/Clang object cache survives the Phase 20 reconfigure.
+# Windows/X86 support is no longer added to the main Swift compiler engine.
+# Route old commands to the isolated backend graph so this script can never
+# trigger another full Swift + AArch64 + X86 compiler rebuild.
 
-REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-BASE_SCRIPT="$REPO_ROOT/scripts/build-mobile-compiler-engine.sh"
-GENERATED_SCRIPT="$REPO_ROOT/scripts/.build-mobile-compiler-engine-windows.generated.sh"
-MODE="${1:-configure}"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
-[[ -f "$BASE_SCRIPT" ]] || { echo "error: missing $BASE_SCRIPT" >&2; exit 1; }
-
-cleanup() {
-  rm -f "$GENERATED_SCRIPT"
-}
-trap cleanup EXIT
-
-cp "$BASE_SCRIPT" "$GENERATED_SCRIPT"
-python3 - "$GENERATED_SCRIPT" <<'PY'
-from pathlib import Path
-import sys
-
-path = Path(sys.argv[1])
-text = path.read_text()
-
-old_targets = '    -DLLVM_TARGETS_TO_BUILD=AArch64 \\\n'
-new_targets = '    -DLLVM_TARGETS_TO_BUILD="AArch64;X86" \\\n'
-if old_targets not in text:
-    raise SystemExit('error: expected LLVM_TARGETS_TO_BUILD=AArch64 line not found')
-text = text.replace(old_targets, new_targets, 1)
-
-# LLVM_BUILD_TOOLS=OFF does not control LLD's own `lld` frontend executable.
-# LLD uses its separate LLD_BUILD_TOOLS switch. Keep the driver libraries in
-# the graph, but prevent CMake from installing the standalone iOS bundle target.
-anchor = '    -DLLVM_BUILD_TOOLS=OFF \\\n'
-injected = anchor + '    -DLLD_BUILD_TOOLS=OFF \\\n'
-if anchor not in text:
-    raise SystemExit('error: expected LLVM_BUILD_TOOLS=OFF line not found')
-text = text.replace(anchor, injected, 1)
-
-# The base script intentionally does a clean configure by deleting BUILD_ROOT.
-# That is wrong for Phase 20 because adding X86 should be an in-place CMake
-# reconfigure so already-built AArch64/Swift/Clang objects remain reusable.
-clean_line = '  rm -rf "$BUILD_ROOT" "$PACKAGE_ROOT"\n'
-preserve_line = '  rm -rf "$PACKAGE_ROOT"\n  mkdir -p "$BUILD_ROOT"\n'
-if clean_line not in text:
-    raise SystemExit('error: expected clean configure line not found')
-text = text.replace(clean_line, preserve_line, 1)
-
-path.write_text(text)
-PY
-chmod +x "$GENERATED_SCRIPT"
-
-echo "Phase 20 compiler engine: enabling LLVM targets AArch64 + X86"
-echo "Phase 20 compiler engine: disabling standalone LLD tool (embedded drivers stay enabled)"
-echo "Phase 20 compiler engine: preserving existing build-ios object cache"
-echo "mode: $MODE"
-bash "$GENERATED_SCRIPT" "$MODE"
+echo "Phase 20: Windows support now uses the isolated XToolWindowsBackend dylib."
+echo "Redirecting to scripts/build-mobile-windows-backend.sh ..."
+exec bash "$ROOT/scripts/build-mobile-windows-backend.sh" "$@"
