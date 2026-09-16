@@ -13,9 +13,9 @@ RUNTIME_REV="swift-sdk-v7-validated-swift-shims"
 RUNTIME_REV_STAMP="$ROOT/.build/.xtool-mobile-runtime-rev"
 IPA="$ROOT/.build/XToolMobileApp-unsigned.ipa"
 IPA_ENGINE_PATH="Payload/XToolMobileApp.app/Frameworks/libXToolCompilerEngine.dylib"
-COMPILER_CONFIG_REV="ios-clang-lld-v1"
+COMPILER_CONFIG_REV="ios-clang-lld-coff-x86-v2"
 COMPILER_CONFIG_STAMP="$WORK_ROOT/.xtool-compiler-config-rev"
-COMPILER_ENGINE_REV="clang-lld-swiftmodules-v6"
+COMPILER_ENGINE_REV="clang-lld-swiftmodules-coff-x86-v7"
 COMPILER_ENGINE_STAMP="$WORK_ROOT/.xtool-compiler-engine-rev"
 
 mkdir -p "$ROOT/.build"
@@ -66,8 +66,11 @@ compiler_graph_is_usable() {
 
 compiler_graph_has_clang_lld() {
   compiler_graph_is_usable || return 1
+  [[ -f "$BUILD_ROOT/CMakeCache.txt" ]] || return 1
   grep -q 'clangFrontendTool' "$BUILD_ROOT/build.ninja" || return 1
-  grep -q 'lldMachO' "$BUILD_ROOT/build.ninja"
+  grep -q 'lldMachO' "$BUILD_ROOT/build.ninja" || return 1
+  grep -q 'lldCOFF' "$BUILD_ROOT/build.ninja" || return 1
+  grep -q 'LLVM_TARGETS_TO_BUILD:STRING=AArch64;X86' "$BUILD_ROOT/CMakeCache.txt"
 }
 
 compiler_config_is_current() {
@@ -113,9 +116,11 @@ run_all() {
   echo
 
   if compiler_graph_is_usable && ! compiler_graph_has_clang_lld; then
-    echo 'error: the preserved compiler graph predates the Clang + LLD bootstrap.' >&2
-    echo 'Run this cache-preserving upgrade once:' >&2
-    echo '  XTOOL_COMPILER_JOBS=3 bash scripts/bootstrap-mobile-clang-lld.sh' >&2
+    echo 'error: the preserved compiler graph predates the Windows COFF/X86 bootstrap.' >&2
+    echo 'Reconfigure and build the expanded engine once:' >&2
+    echo '  bash scripts/build-mobile-compiler-engine-windows.sh configure' >&2
+    echo '  bash scripts/build-mobile-compiler-engine-windows.sh build' >&2
+    echo 'Then rerun this one-shot script to package XTool Mobile.' >&2
     return 2
   fi
 
@@ -128,9 +133,9 @@ run_all() {
     if compiler_graph_is_usable; then
       echo '=== compiler configure ==='
       if compiler_config_is_current; then
-        echo 'cache hit: current CMake graph contains Swift + Clang + LLD engine targets'
+        echo 'cache hit: current CMake graph contains Swift + Clang + Mach-O/COFF LLD + AArch64/X86 targets'
       else
-        echo 'existing working CMake graph found; preserving compiled object cache'
+        echo 'existing Windows-capable CMake graph found; preserving compiled object cache'
         echo 'backfilling config revision stamp without reconfiguring'
         printf '%s\n' "$COMPILER_CONFIG_REV" > "$COMPILER_CONFIG_STAMP"
       fi
@@ -139,7 +144,7 @@ run_all() {
       bash scripts/patch-mobile-compiler-ios-sources.sh
     else
       echo '=== compiler configure ==='
-      bash scripts/run-mobile-compiler-engine.sh configure
+      bash scripts/build-mobile-compiler-engine-windows.sh configure
       printf '%s\n' "$COMPILER_CONFIG_REV" > "$COMPILER_CONFIG_STAMP"
     fi
 
@@ -148,7 +153,7 @@ run_all() {
     bash scripts/patch-mobile-compiler-sdk-macro-interface.sh
 
     echo '=== compiler build ==='
-    bash scripts/run-mobile-compiler-engine.sh build
+    bash scripts/build-mobile-compiler-engine-windows.sh build
     printf '%s\n' "$COMPILER_ENGINE_REV" > "$COMPILER_ENGINE_STAMP"
   fi
 
@@ -223,4 +228,3 @@ else
 fi
 
 exit "$status"
-
