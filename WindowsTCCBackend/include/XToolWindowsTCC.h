@@ -14,6 +14,11 @@ int32_t xtool_windows_tcc_compile_string(
     const char *output_path_utf8
 );
 
+/// Last human-readable diagnostic produced by the TinyCC backend.
+/// The returned pointer remains owned by the backend and is valid until the
+/// next compile attempt.
+const char *xtool_windows_tcc_last_error(void);
+
 /// Human-readable backend build/version string.
 const char *xtool_windows_tcc_version(void);
 
