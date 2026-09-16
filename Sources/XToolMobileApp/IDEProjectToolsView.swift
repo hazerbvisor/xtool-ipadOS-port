@@ -110,7 +110,7 @@ struct IDEProjectToolsView: View {
     var body: some View {
         VStack {
             Picker("Tools", selection: $tab) {
-                ForEach(["Files", "Search", "Builds", "SDK"], id: \.self) {
+                ForEach(["Files", "Search", "Builds", "Windows", "SDK"], id: \.self) {
                     Text($0).tag($0)
                 }
             }
@@ -233,6 +233,8 @@ struct IDEProjectToolsView: View {
                         }
                     }
                 }
+            } else if tab == "Windows" {
+                IDEWindowsToolsView()
             } else {
                 sdkTools
             }
