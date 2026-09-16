@@ -111,24 +111,114 @@ generate_config() {
 EOF
 }
 
-find_macho_linker() {
-  local candidate
-  if [[ -n "${XTOOL_MACHO_LINKER:-}" && -x "${XTOOL_MACHO_LINKER}" ]]; then
-    printf '%s' "$XTOOL_MACHO_LINKER"
+prepare_macho_probe_object() {
+  local probe_dir="$BUILD_ROOT/macho-linker-probe"
+  mkdir -p "$probe_dir"
+  cat > "$probe_dir/probe.c" <<'EOF'
+__attribute__((visibility("default"))) int xtool_macho_link_probe(void) { return 0; }
+EOF
+  "$CLANG" --target="$TARGET" -isysroot "$IOS_SDK" -fPIC \
+    -c "$probe_dir/probe.c" -o "$probe_dir/probe.o"
+}
+
+probe_macho_linker() {
+  local linker="$1"
+  local label="$2"
+  local probe_dir="$BUILD_ROOT/macho-linker-probe"
+  local output="$probe_dir/probe.dylib"
+  local log="$probe_dir/probe.log"
+
+  rm -f "$output" "$log"
+  if "$linker" \
+      -arch arm64 \
+      -dylib \
+      -platform_version ios "$DEPLOYMENT" "$DEPLOYMENT" \
+      -install_name @rpath/xtool-macho-probe.dylib \
+      -o "$output" \
+      "$probe_dir/probe.o" \
+      >"$log" 2>&1; then
+    echo "Mach-O linker probe: OK [$label] $linker" >&2
     return 0
   fi
 
+  echo "Mach-O linker probe: rejected [$label] $linker" >&2
+  if [[ -s "$log" ]]; then
+    tail -n 4 "$log" | sed 's/^/  /' >&2
+  fi
+  return 1
+}
+
+make_darwin_lld_wrapper() {
+  local lld="$1"
+  local wrapper="$BUILD_ROOT/xtool-ld64-wrapper"
+  cat > "$wrapper" <<EOF
+#!/usr/bin/env bash
+exec "$lld" -flavor darwin "\$@"
+EOF
+  chmod +x "$wrapper"
+  printf '%s' "$wrapper"
+}
+
+find_macho_linker() {
+  local candidate=""
+  local resolved=""
+  local seen="|"
+
+  prepare_macho_probe_object
+
+  # An explicit override wins, but still has to prove that it can target iOS.
+  if [[ -n "${XTOOL_MACHO_LINKER:-}" && -x "${XTOOL_MACHO_LINKER}" ]]; then
+    candidate="$XTOOL_MACHO_LINKER"
+    case "$(basename "$candidate")" in
+      ld64.lld|ld64.lld-*) resolved="$candidate" ;;
+      *) resolved="$(make_darwin_lld_wrapper "$candidate")" ;;
+    esac
+    if probe_macho_linker "$resolved" "XTOOL_MACHO_LINKER"; then
+      printf '%s' "$resolved"
+      return 0
+    fi
+    echo "Explicit XTOOL_MACHO_LINKER cannot link for iOS; trying installed alternatives." >&2
+  fi
+
+  # Prefer a source-matched repaired linker if one already exists, then normal
+  # distro LLVM. The Swift toolchain copy is deliberately last because Swift's
+  # Linux fork may carry a downstream guard that rejects Apple platforms.
   for candidate in \
     "$ROOT/.build/mobile-compiler-engine/host-tblgen/bin/ld64.lld" \
-    /opt/swift/usr/bin/ld64.lld \
     /usr/bin/ld64.lld \
+    /usr/bin/ld64.lld-* \
     /data/data/com.termux/files/usr/bin/ld64.lld \
-    "$(command -v ld64.lld 2>/dev/null || true)"; do
-    if [[ -n "$candidate" && -x "$candidate" ]]; then
+    /data/data/com.termux/files/usr/bin/ld64.lld-* \
+    "$(command -v ld64.lld 2>/dev/null || true)" \
+    /opt/swift/usr/bin/ld64.lld; do
+    [[ -n "$candidate" && -x "$candidate" ]] || continue
+    case "$seen" in *"|$candidate|"*) continue ;; esac
+    seen+="$candidate|"
+    if probe_macho_linker "$candidate" "ld64.lld"; then
       printf '%s' "$candidate"
       return 0
     fi
   done
+
+  # Some Linux LLVM packages expose only the multicall `lld` executable. Wrap
+  # it with `-flavor darwin` and probe it exactly like ld64.lld.
+  for candidate in \
+    /usr/bin/lld \
+    /usr/bin/lld-* \
+    /data/data/com.termux/files/usr/bin/lld \
+    /data/data/com.termux/files/usr/bin/lld-* \
+    "$(command -v lld 2>/dev/null || true)" \
+    /opt/swift/usr/bin/lld; do
+    [[ -n "$candidate" && -x "$candidate" ]] || continue
+    case "$seen" in *"|$candidate|"*) continue ;; esac
+    seen+="$candidate|"
+    resolved="$(make_darwin_lld_wrapper "$candidate")"
+    if probe_macho_linker "$resolved" "lld -flavor darwin ($candidate)"; then
+      printf '%s' "$resolved"
+      return 0
+    fi
+  done
+
   return 1
 }
 
@@ -176,14 +266,12 @@ build_backend() {
 
   local macho_linker=""
   macho_linker="$(find_macho_linker || true)"
-  local link_driver=()
-  if [[ -n "$macho_linker" ]]; then
-    link_driver+=(--ld-path="$macho_linker")
-  fi
+  [[ -n "$macho_linker" ]] || die "no installed LLD Mach-O driver can link arm64 iOS; no compiler caches were deleted"
+  echo "Selected Mach-O linker: $macho_linker"
 
   echo "[3/3] linking arm64 iOS backend dylib..."
   "$CLANG" --target="$TARGET" -isysroot "$IOS_SDK" -dynamiclib \
-    "${link_driver[@]}" \
+    --ld-path="$macho_linker" \
     "$BUILD_ROOT/libtcc-x86_64-pe.o" \
     "$BUILD_ROOT/XToolWindowsTCC.o" \
     -Wl,-arch,arm64 \
