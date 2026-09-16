@@ -14,6 +14,8 @@ DEPLOYMENT="${XTOOL_IOS_DEPLOYMENT_TARGET:-16.0}"
 TARGET="arm64-apple-ios${DEPLOYMENT}"
 JOBS="${XTOOL_WINDOWS_JOBS:-${XTOOL_COMPILER_JOBS:-2}}"
 BACKEND_DYLIB="$PACKAGE_ROOT/libXToolWindowsBackend.dylib"
+GRAPH_REV="llvm-bitcode-x86-lld-v2"
+GRAPH_STAMP="$BUILD_ROOT/.xtool-windows-graph-rev"
 
 # Reuse the existing source checkout if possible, but this build has a separate
 # CMake graph and enables only LLVM + LLD. It does NOT configure Swift or Clang.
@@ -69,9 +71,23 @@ prepare_native_tools() {
   ln -sfn "$LLVM_TBLGEN" "$NATIVE_ROOT/bin/llvm-tblgen"
 }
 
+reset_stale_graph_if_needed() {
+  local current=""
+  if [[ -f "$GRAPH_STAMP" ]]; then
+    current="$(cat "$GRAPH_STAMP" 2>/dev/null || true)"
+  fi
+
+  if [[ -f "$BUILD_ROOT/build.ninja" && "$current" != "$GRAPH_REV" ]]; then
+    echo "Windows backend graph changed ($current -> $GRAPH_REV)."
+    echo "Removing ONLY the isolated Windows build graph; main compiler cache is untouched."
+    rm -rf "$BUILD_ROOT" "$PACKAGE_ROOT"
+  fi
+}
+
 configure_backend() {
   prepare_source
   prepare_native_tools
+  reset_stale_graph_if_needed
   mkdir -p "$BUILD_ROOT" "$PACKAGE_ROOT"
 
   local macho_linker="${XTOOL_MACHO_LINKER:-}"
@@ -144,6 +160,8 @@ configure_backend() {
     -DLLVM_ENABLE_ZSTD=OFF \
     "${extra_linker[@]}"
 
+  printf '%s\n' "$GRAPH_REV" > "$GRAPH_STAMP"
+
   section "configuration result"
   echo "CMake configuration completed."
   echo "Ninja work items for LLVM-bitcode -> X86 COFF backend:"
@@ -153,6 +171,7 @@ configure_backend() {
 
 build_backend() {
   [[ -f "$BUILD_ROOT/build.ninja" ]] || die "Windows backend is not configured; run configure first"
+  [[ -f "$GRAPH_STAMP" ]] && [[ "$(cat "$GRAPH_STAMP")" == "$GRAPH_REV" ]] || die "Windows backend graph is stale; rerun configure"
   section "build isolated XToolWindowsBackend dylib"
   "$CMAKE" --build "$BUILD_ROOT" --target XToolWindowsBackend -- -j "$JOBS"
 
@@ -168,6 +187,7 @@ build_backend() {
 show_status() {
   section "Windows backend status"
   echo "work root: $WORK_ROOT"
+  echo "graph revision: $GRAPH_REV"
   [[ -f "$BUILD_ROOT/build.ninja" ]] && echo "configured: yes" || echo "configured: no"
   if [[ -f "$BACKEND_DYLIB" ]]; then
     echo "backend: $BACKEND_DYLIB"
