@@ -4,7 +4,7 @@ import XToolMobileCore
 
 struct IDEWindowsToolsView: View {
     @State private var source = """
-    int main(void) {
+    int _start(void) {
         return 42;
     }
     """
@@ -28,7 +28,7 @@ struct IDEWindowsToolsView: View {
             }
 
             Section("HelloWin.c") {
-                Text("This bootstrap uses no Windows CRT or SDK. `main` is the PE entry point, which keeps the generated EXE self-contained for WinPad loader tests.")
+                Text("This bootstrap uses no Windows CRT or SDK. `_start` is TinyCC's native freestanding PE entry point, so the generated EXE stays completely self-contained for WinPad loader tests.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
 

@@ -23,6 +23,7 @@ public final class MobileTinyCCWindowsCompiler: @unchecked Sendable {
 
     private let handle: UnsafeMutableRawPointer
     private let compileStringFunction: CompileString
+    private let lastErrorFunction: ReadString?
 
     public let location: URL
     public let version: String
@@ -31,12 +32,14 @@ public final class MobileTinyCCWindowsCompiler: @unchecked Sendable {
     private init(
         handle: UnsafeMutableRawPointer,
         compileStringFunction: @escaping CompileString,
+        lastErrorFunction: ReadString?,
         location: URL,
         version: String,
         target: String
     ) {
         self.handle = handle
         self.compileStringFunction = compileStringFunction
+        self.lastErrorFunction = lastErrorFunction
         self.location = location
         self.version = version
         self.target = target
@@ -70,6 +73,9 @@ public final class MobileTinyCCWindowsCompiler: @unchecked Sendable {
                 )
             }
             let compileString = unsafeBitCast(compileSymbol, to: CompileString.self)
+            let lastError = dlsym(handle, "xtool_windows_tcc_last_error").map {
+                unsafeBitCast($0, to: ReadString.self)
+            }
 
             let version = readStringSymbol(
                 named: "xtool_windows_tcc_version",
@@ -83,6 +89,7 @@ public final class MobileTinyCCWindowsCompiler: @unchecked Sendable {
             return MobileTinyCCWindowsCompiler(
                 handle: handle,
                 compileStringFunction: compileString,
+                lastErrorFunction: lastError,
                 location: location,
                 version: version,
                 target: target
@@ -109,7 +116,15 @@ public final class MobileTinyCCWindowsCompiler: @unchecked Sendable {
         }
 
         guard status == 0 else {
-            throw MobileTinyCCWindowsCompilerError.compileFailed(status)
+            let diagnostic: String?
+            if let lastErrorFunction,
+               let value = lastErrorFunction(),
+               value.pointee != 0 {
+                diagnostic = String(cString: value)
+            } else {
+                diagnostic = nil
+            }
+            throw MobileTinyCCWindowsCompilerError.compileFailed(status, diagnostic)
         }
         guard fileManager.fileExists(atPath: outputURL.path) else {
             throw MobileTinyCCWindowsCompilerError.outputMissing(outputURL)
@@ -148,7 +163,7 @@ public enum MobileTinyCCWindowsCompilerError: Error, CustomStringConvertible, Se
     case notBundled([URL])
     case loadFailed(URL, String)
     case missingSymbol(String)
-    case compileFailed(Int32)
+    case compileFailed(Int32, String?)
     case outputMissing(URL)
 
     public var description: String {
@@ -160,8 +175,11 @@ public enum MobileTinyCCWindowsCompilerError: Error, CustomStringConvertible, Se
             return "Could not load TinyCC Windows backend at \(url.path): \(message)"
         case .missingSymbol(let symbol):
             return "TinyCC Windows backend is missing required symbol: \(symbol)"
-        case .compileFailed(let status):
-            return "TinyCC Windows compilation failed with status \(status)."
+        case .compileFailed(let status, let diagnostic):
+            if let diagnostic, !diagnostic.isEmpty {
+                return "TinyCC Windows compilation failed at stage \(status): \(diagnostic)"
+            }
+            return "TinyCC Windows compilation failed at stage \(status)."
         case .outputMissing(let url):
             return "TinyCC reported success but did not create \(url.lastPathComponent)."
         }
