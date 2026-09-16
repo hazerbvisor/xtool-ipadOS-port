@@ -16,11 +16,13 @@ EXECUTABLE="$BUILD_DIR/XToolMobileApp"
 RUNTIME="$ROOT/.build/XToolMobileRuntime"
 RUNTIME_ARCHIVE="${RUNTIME_ARCHIVE:-$ROOT/.build/XToolMobileRuntime.tar}"
 COMPILER_ENGINE_DYLIB="${COMPILER_ENGINE_DYLIB:-$ROOT/.build/mobile-compiler-engine/package/libXToolCompilerEngine.dylib}"
+WINDOWS_BACKEND_DYLIB="${WINDOWS_BACKEND_DYLIB:-$ROOT/.build/mobile-windows-backend/package/libXToolWindowsBackend.dylib}"
 STAGE="$ROOT/.build/mobile-package"
 PAYLOAD="$STAGE/Payload"
 APP="$PAYLOAD/XToolMobileApp.app"
 IPA="$ROOT/.build/XToolMobileApp-unsigned.ipa"
 ENGINE_BUNDLED=0
+WINDOWS_BACKEND_BUNDLED=0
 
 if [[ ! -f "$EXECUTABLE" ]]; then
   echo "error: missing executable: $EXECUTABLE" >&2
@@ -47,6 +49,17 @@ else
   fi
   echo "Compiler engine not bundled yet (frontend planning/probes remain usable)."
   echo "Expected optional engine at: $COMPILER_ENGINE_DYLIB"
+fi
+
+if [[ -f "$WINDOWS_BACKEND_DYLIB" ]]; then
+  echo "Bundling optional X86/COFF Windows backend..."
+  mkdir -p "$APP/Frameworks"
+  cp "$WINDOWS_BACKEND_DYLIB" "$APP/Frameworks/libXToolWindowsBackend.dylib"
+  chmod 0755 "$APP/Frameworks/libXToolWindowsBackend.dylib"
+  WINDOWS_BACKEND_BUNDLED=1
+else
+  echo "Windows backend not bundled yet (normal Swift/iOS builds remain available)."
+  echo "Expected optional backend at: $WINDOWS_BACKEND_DYLIB"
 fi
 
 if [[ "$BUNDLE_RUNTIME_ARCHIVE" == "1" ]]; then
@@ -147,6 +160,8 @@ Created unsigned IPA:
 Signing: intentionally unsigned; no provisioning profile included.
 Compiler engine bundled: $ENGINE_BUNDLED
 Compiler engine path: $COMPILER_ENGINE_DYLIB
+Windows backend bundled: $WINDOWS_BACKEND_BUNDLED
+Windows backend path: $WINDOWS_BACKEND_DYLIB
 Bundled runtime archive: $BUNDLE_RUNTIME_ARCHIVE
 Runtime archive source: $RUNTIME_ARCHIVE
 Expanded runtime: $EMBED_RUNTIME_EXPANDED
