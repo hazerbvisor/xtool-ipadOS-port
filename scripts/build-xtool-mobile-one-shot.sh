@@ -77,9 +77,14 @@ compiler_config_is_current() {
 }
 
 compiler_engine_is_current() {
-  [[ -f "$ENGINE" ]] || return 1
+  [[ -s "$ENGINE" ]] || return 1
   [[ -f "$COMPILER_ENGINE_STAMP" ]] || return 1
   [[ "$(cat "$COMPILER_ENGINE_STAMP" 2>/dev/null || true)" == "$COMPILER_ENGINE_REV" ]]
+}
+
+compiler_engine_is_usable() {
+  [[ -s "$ENGINE" ]] || return 1
+  compiler_graph_has_clang_lld
 }
 
 runtime_is_current() {
@@ -128,6 +133,13 @@ run_all() {
     echo "cache hit: compiler engine revision $COMPILER_ENGINE_REV"
     file "$ENGINE" 2>/dev/null || true
     ls -lh "$ENGINE"
+  elif compiler_engine_is_usable; then
+    echo '=== compiler engine ==='
+    echo 'cache hit: existing compiler engine is usable; preserving it'
+    echo "backfilling engine revision stamp to $COMPILER_ENGINE_REV"
+    printf '%s\n' "$COMPILER_ENGINE_REV" > "$COMPILER_ENGINE_STAMP"
+    file "$ENGINE" 2>/dev/null || true
+    ls -lh "$ENGINE"
   else
     if compiler_graph_is_usable; then
       echo '=== compiler configure ==='
@@ -156,8 +168,8 @@ run_all() {
     printf '%s\n' "$COMPILER_ENGINE_REV" > "$COMPILER_ENGINE_STAMP"
   fi
 
-  [[ -f "$ENGINE" ]] || {
-    echo "error: compiler build phase ended without final engine: $ENGINE" >&2
+  [[ -s "$ENGINE" ]] || {
+    echo "error: compiler build phase ended without usable engine: $ENGINE" >&2
     return 1
   }
 
@@ -227,4 +239,3 @@ else
 fi
 
 exit "$status"
-
