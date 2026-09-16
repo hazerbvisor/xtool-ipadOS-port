@@ -6,13 +6,12 @@ import Darwin
 import Glibc
 #endif
 
-/// Loads the optional compiler engine bundled inside XTool Mobile and invokes
-/// Swift, Clang and LLD through a small stable C ABI.
-///
-/// Keeping the heavy compiler implementation behind a dylib means the app, UI
-/// and build planner can be rebuilt independently from the compiler itself.
+/// Loads the main XTool compiler engine and, when bundled, the isolated Windows
+/// backend. Swift/iOS work stays in the main dylib while x86_64 Windows Clang
+/// and COFF LLD calls are routed to libXToolWindowsBackend.dylib.
 public final class MobileCompilerEngine: MobileProjectCompiler, @unchecked Sendable {
     public static let dylibName = "libXToolCompilerEngine.dylib"
+    public static let windowsDylibName = "libXToolWindowsBackend.dylib"
 
     private typealias NativeRun = @convention(c) (
         Int32,
@@ -21,37 +20,56 @@ public final class MobileCompilerEngine: MobileProjectCompiler, @unchecked Senda
     private typealias VersionRead = @convention(c) () -> UnsafePointer<CChar>?
 
     private let handle: UnsafeMutableRawPointer
+    private let windowsHandle: UnsafeMutableRawPointer?
     private let runFrontendFunction: NativeRun
     private let runClangFunction: NativeRun?
+    private let runWindowsClangFunction: NativeRun?
     private let runLLDMachOFunction: NativeRun?
     private let runLLDCOFFFunction: NativeRun?
     public let location: URL
+    public let windowsLocation: URL?
     public let version: String
+    public let windowsVersion: String?
 
     private init(
         handle: UnsafeMutableRawPointer,
+        windowsHandle: UnsafeMutableRawPointer?,
         runFrontendFunction: @escaping NativeRun,
         runClangFunction: NativeRun?,
+        runWindowsClangFunction: NativeRun?,
         runLLDMachOFunction: NativeRun?,
         runLLDCOFFFunction: NativeRun?,
         location: URL,
-        version: String
+        windowsLocation: URL?,
+        version: String,
+        windowsVersion: String?
     ) {
         self.handle = handle
+        self.windowsHandle = windowsHandle
         self.runFrontendFunction = runFrontendFunction
         self.runClangFunction = runClangFunction
+        self.runWindowsClangFunction = runWindowsClangFunction
         self.runLLDMachOFunction = runLLDMachOFunction
         self.runLLDCOFFFunction = runLLDCOFFFunction
         self.location = location
+        self.windowsLocation = windowsLocation
         self.version = version
+        self.windowsVersion = windowsVersion
     }
 
     deinit {
+        if let windowsHandle {
+            dlclose(windowsHandle)
+        }
         dlclose(handle)
     }
 
     public var supportsClangFrontend: Bool {
         runClangFunction != nil
+    }
+
+    public var supportsWindowsClang: Bool {
+        runWindowsClangFunction != nil
     }
 
     public var supportsMachOLLD: Bool {
@@ -79,6 +97,7 @@ public final class MobileCompilerEngine: MobileProjectCompiler, @unchecked Senda
             throw MobileCompilerEngineError.loadFailed(location, message)
         }
 
+        var loadedWindowsHandle: UnsafeMutableRawPointer?
         do {
             guard let runSymbol = dlsym(handle, "xtool_swift_frontend_run") else {
                 throw MobileCompilerEngineError.missingSymbol("xtool_swift_frontend_run")
@@ -91,8 +110,44 @@ public final class MobileCompilerEngine: MobileProjectCompiler, @unchecked Senda
             let runLLDMachO: NativeRun? = dlsym(handle, "xtool_lld_macho_run").map {
                 unsafeBitCast($0, to: NativeRun.self)
             }
-            let runLLDCOFF: NativeRun? = dlsym(handle, "xtool_lld_coff_run").map {
+
+            // Backward compatibility: older combined engines may still export
+            // xtool_lld_coff_run. Prefer the separate Windows backend when it is
+            // present, but keeping this fallback lets older packaged engines run.
+            var runLLDCOFF: NativeRun? = dlsym(handle, "xtool_lld_coff_run").map {
                 unsafeBitCast($0, to: NativeRun.self)
+            }
+            var runWindowsClang: NativeRun?
+            var windowsLocation: URL?
+            var windowsVersion: String?
+
+            let windowsCandidates = windowsBundleCandidates(bundle: bundle)
+            if let candidate = windowsCandidates.first(where: {
+                fileManager.fileExists(atPath: $0.path)
+            }) {
+                dlerror()
+                guard let candidateHandle = dlopen(candidate.path, RTLD_NOW | RTLD_LOCAL) else {
+                    let message = dlerror().map { String(cString: $0) } ?? "unknown dlopen error"
+                    throw MobileCompilerEngineError.loadFailed(candidate, message)
+                }
+                loadedWindowsHandle = candidateHandle
+                windowsLocation = candidate
+
+                guard let windowsClangSymbol = dlsym(candidateHandle, "xtool_windows_clang_run") else {
+                    throw MobileCompilerEngineError.missingSymbol("xtool_windows_clang_run")
+                }
+                guard let windowsCOFFSymbol = dlsym(candidateHandle, "xtool_windows_lld_coff_run") else {
+                    throw MobileCompilerEngineError.missingSymbol("xtool_windows_lld_coff_run")
+                }
+                runWindowsClang = unsafeBitCast(windowsClangSymbol, to: NativeRun.self)
+                runLLDCOFF = unsafeBitCast(windowsCOFFSymbol, to: NativeRun.self)
+
+                if let versionSymbol = dlsym(candidateHandle, "xtool_windows_backend_version") {
+                    let readVersion = unsafeBitCast(versionSymbol, to: VersionRead.self)
+                    if let value = readVersion() {
+                        windowsVersion = String(cString: value)
+                    }
+                }
             }
 
             var version = "unknown"
@@ -105,25 +160,26 @@ public final class MobileCompilerEngine: MobileProjectCompiler, @unchecked Senda
 
             return MobileCompilerEngine(
                 handle: handle,
+                windowsHandle: loadedWindowsHandle,
                 runFrontendFunction: runFrontend,
                 runClangFunction: runClang,
+                runWindowsClangFunction: runWindowsClang,
                 runLLDMachOFunction: runLLDMachO,
                 runLLDCOFFFunction: runLLDCOFF,
                 location: location,
-                version: version
+                windowsLocation: windowsLocation,
+                version: version,
+                windowsVersion: windowsVersion
             )
         } catch {
+            if let loadedWindowsHandle {
+                dlclose(loadedWindowsHandle)
+            }
             dlclose(handle)
             throw error
         }
     }
 
-    /// Executes one already-prepared Swift frontend job in-process.
-    ///
-    /// `swift::performFrontend` expects the arguments that come *after* the
-    /// desktop driver's `-frontend` dispatch marker. Strip that marker here as
-    /// a defensive compatibility measure so older cached plans cannot feed a
-    /// driver-only option to the embedded frontend.
     public func run(_ plan: MobileCompilerPlan) throws -> MobileBuildResult {
         try runSwiftFrontend(arguments: plan.arguments)
     }
@@ -141,32 +197,42 @@ public final class MobileCompilerEngine: MobileProjectCompiler, @unchecked Senda
         )
     }
 
-    /// Executes Clang's cc1 frontend in-process.
-    ///
-    /// Arguments are frontend/cc1 arguments and must not contain an executable
-    /// argv[0] entry or the desktop driver's `-cc1` dispatch marker.
+    /// Routes Windows triples to the isolated X86 backend while ordinary iOS
+    /// Clang jobs continue through the main compiler engine.
     public func runClangFrontend(arguments: [String], diagnosticsURL: URL? = nil) throws -> MobileBuildResult {
-        guard let runClangFunction else {
-            throw MobileCompilerEngineError.missingSymbol("xtool_clang_frontend_run")
-        }
-
         var frontendArguments = arguments
         if frontendArguments.first == "-cc1" {
             frontendArguments.removeFirst()
         }
 
+        let function: NativeRun
+        if Self.isWindowsClangJob(frontendArguments) {
+            guard let runWindowsClangFunction else {
+                throw MobileCompilerEngineError.missingSymbol("xtool_windows_clang_run")
+            }
+            function = runWindowsClangFunction
+        } else {
+            guard let runClangFunction else {
+                throw MobileCompilerEngineError.missingSymbol("xtool_clang_frontend_run")
+            }
+            function = runClangFunction
+        }
+
         return try runNative(
             arguments: frontendArguments,
-            function: runClangFunction,
+            function: function,
             diagnosticsURL: diagnosticsURL
         )
     }
 
-    /// Executes LLD's Darwin/Mach-O driver in-process.
-    ///
-    /// Pass ordinary ld64-style arguments. The native bridge supplies the
-    /// synthetic argv[0] entry required by `lldMain`.
+    /// Existing callers historically use this method for the native linker
+    /// probe. Preserve that API: slash-prefixed lld-link arguments route to the
+    /// optional COFF backend, while ordinary dash-prefixed arguments use Mach-O.
     public func runMachOLLD(arguments: [String], diagnosticsURL: URL? = nil) throws -> MobileBuildResult {
+        if Self.looksLikeCOFFLink(arguments) {
+            return try runCOFFLLD(arguments: arguments, diagnosticsURL: diagnosticsURL)
+        }
+
         guard let runLLDMachOFunction else {
             throw MobileCompilerEngineError.missingSymbol("xtool_lld_macho_run")
         }
@@ -178,13 +244,9 @@ public final class MobileCompilerEngine: MobileProjectCompiler, @unchecked Senda
         )
     }
 
-    /// Executes LLD's Windows COFF/PE driver in-process.
-    ///
-    /// Pass ordinary `lld-link` style arguments. The native bridge supplies the
-    /// synthetic argv[0] entry required by `lldMain`.
     public func runCOFFLLD(arguments: [String], diagnosticsURL: URL? = nil) throws -> MobileBuildResult {
         guard let runLLDCOFFFunction else {
-            throw MobileCompilerEngineError.missingSymbol("xtool_lld_coff_run")
+            throw MobileCompilerEngineError.missingSymbol("xtool_windows_lld_coff_run")
         }
 
         return try runNative(
@@ -195,19 +257,47 @@ public final class MobileCompilerEngine: MobileProjectCompiler, @unchecked Senda
     }
 
     public static func bundleCandidates(bundle: Bundle = .main) -> [URL] {
+        dylibCandidates(named: dylibName, bundle: bundle)
+    }
+
+    public static func windowsBundleCandidates(bundle: Bundle = .main) -> [URL] {
+        dylibCandidates(named: windowsDylibName, bundle: bundle)
+    }
+
+    private static func dylibCandidates(named name: String, bundle: Bundle) -> [URL] {
         var result: [URL] = []
         if let frameworks = bundle.privateFrameworksURL {
-            result.append(frameworks.appendingPathComponent(dylibName))
+            result.append(frameworks.appendingPathComponent(name))
         }
         result.append(
             bundle.bundleURL
                 .appendingPathComponent("Frameworks", isDirectory: true)
-                .appendingPathComponent(dylibName)
+                .appendingPathComponent(name)
         )
-        result.append(bundle.bundleURL.appendingPathComponent(dylibName))
+        result.append(bundle.bundleURL.appendingPathComponent(name))
 
         var seen = Set<String>()
         return result.filter { seen.insert($0.standardizedFileURL.path).inserted }
+    }
+
+    private static func isWindowsClangJob(_ arguments: [String]) -> Bool {
+        for (index, argument) in arguments.enumerated() where argument == "-triple" || argument == "-target" {
+            let targetIndex = arguments.index(arguments.startIndex, offsetBy: index + 1, limitedBy: arguments.endIndex)
+            if let targetIndex, targetIndex < arguments.endIndex {
+                let target = arguments[targetIndex].lowercased()
+                if target.contains("windows") || target.contains("mingw") {
+                    return true
+                }
+            }
+        }
+        return arguments.contains { argument in
+            let value = argument.lowercased()
+            return value.contains("windows-msvc") || value.contains("windows-gnu") || value.contains("mingw")
+        }
+    }
+
+    private static func looksLikeCOFFLink(_ arguments: [String]) -> Bool {
+        arguments.first?.hasPrefix("/") == true
     }
 
     private func runNative(
@@ -227,21 +317,11 @@ public final class MobileCompilerEngine: MobileProjectCompiler, @unchecked Senda
         )
     }
 
-    /// The embedded compiler stack writes diagnostics to the process stderr file
-    /// descriptor. Capture that descriptor around a single frontend/linker call
-    /// so errors can be surfaced inside XTool Mobile instead of disappearing into
-    /// the application process console.
-    ///
-    /// This is intentionally serialized by the current bootstrap UI (one native
-    /// job at a time). A future concurrent build scheduler should replace the
-    /// process-global descriptor capture with per-engine diagnostic callbacks.
     private func captureStandardError<R>(
         persistingTo diagnosticsURL: URL?,
         _ body: () throws -> R
     ) throws -> (value: R, standardError: Data) {
         let fileManager = FileManager.default
-        // Build captures remain on disk even if the native call never returns.
-        // Probe calls retain their previous temporary-file behavior.
         let captureURL = diagnosticsURL ?? fileManager.temporaryDirectory
             .appendingPathComponent("xtool-native-engine-\(UUID().uuidString).stderr")
 
