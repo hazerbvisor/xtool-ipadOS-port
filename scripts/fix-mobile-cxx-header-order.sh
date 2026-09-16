@@ -55,7 +55,16 @@ fixed_order = '''                    // Match Apple's Clang C++ header search or
                     ]
 '''
 
-if fixed_order not in text:
+# Detect the semantic header order rather than depending on exact comments.
+libcxx_marker = '"-internal-isystem", sdk.sdkURL.appendingPathComponent("usr/include/c++/v1").path,'
+builtin_marker = '"-resource-dir", clang.deletingLastPathComponent().path,'
+sdk_c_marker = '"-internal-isystem", sdk.sdkURL.appendingPathComponent("usr/include").path,'
+libcxx_pos = text.find(libcxx_marker)
+builtin_pos = text.find(builtin_marker)
+sdk_c_pos = text.find(sdk_c_marker)
+header_order_fixed = 0 <= libcxx_pos < builtin_pos < sdk_c_pos
+
+if not header_order_fixed:
     count = text.count(old_order)
     if count != 1:
         raise SystemExit(
