@@ -7,8 +7,9 @@ import Glibc
 #endif
 
 /// Loads the main XTool compiler engine and, when bundled, the isolated Windows
-/// backend. Swift/iOS work stays in the main dylib while x86_64 Windows Clang
-/// and COFF LLD calls are routed to libXToolWindowsBackend.dylib.
+/// backend. Swift and Clang stay in the existing engine. Windows C/C++ jobs are
+/// first emitted as LLVM bitcode by that already-built Clang, then the optional
+/// backend lowers the bitcode with LLVM X86 and links COFF/PE with lldCOFF.
 public final class MobileCompilerEngine: MobileProjectCompiler, @unchecked Sendable {
     public static let dylibName = "libXToolCompilerEngine.dylib"
     public static let windowsDylibName = "libXToolWindowsBackend.dylib"
@@ -23,7 +24,7 @@ public final class MobileCompilerEngine: MobileProjectCompiler, @unchecked Senda
     private let windowsHandle: UnsafeMutableRawPointer?
     private let runFrontendFunction: NativeRun
     private let runClangFunction: NativeRun?
-    private let runWindowsClangFunction: NativeRun?
+    private let runWindowsCodegenFunction: NativeRun?
     private let runLLDMachOFunction: NativeRun?
     private let runLLDCOFFFunction: NativeRun?
     public let location: URL
@@ -36,7 +37,7 @@ public final class MobileCompilerEngine: MobileProjectCompiler, @unchecked Senda
         windowsHandle: UnsafeMutableRawPointer?,
         runFrontendFunction: @escaping NativeRun,
         runClangFunction: NativeRun?,
-        runWindowsClangFunction: NativeRun?,
+        runWindowsCodegenFunction: NativeRun?,
         runLLDMachOFunction: NativeRun?,
         runLLDCOFFFunction: NativeRun?,
         location: URL,
@@ -48,7 +49,7 @@ public final class MobileCompilerEngine: MobileProjectCompiler, @unchecked Senda
         self.windowsHandle = windowsHandle
         self.runFrontendFunction = runFrontendFunction
         self.runClangFunction = runClangFunction
-        self.runWindowsClangFunction = runWindowsClangFunction
+        self.runWindowsCodegenFunction = runWindowsCodegenFunction
         self.runLLDMachOFunction = runLLDMachOFunction
         self.runLLDCOFFFunction = runLLDCOFFFunction
         self.location = location
@@ -68,8 +69,14 @@ public final class MobileCompilerEngine: MobileProjectCompiler, @unchecked Senda
         runClangFunction != nil
     }
 
+    /// Compatibility name retained for callers added during the first Phase 20
+    /// split. Windows compilation now means main-engine Clang + X86 codegen.
     public var supportsWindowsClang: Bool {
-        runWindowsClangFunction != nil
+        runClangFunction != nil && runWindowsCodegenFunction != nil
+    }
+
+    public var supportsWindowsCodegen: Bool {
+        runWindowsCodegenFunction != nil
     }
 
     public var supportsMachOLLD: Bool {
@@ -117,7 +124,7 @@ public final class MobileCompilerEngine: MobileProjectCompiler, @unchecked Senda
             var runLLDCOFF: NativeRun? = dlsym(handle, "xtool_lld_coff_run").map {
                 unsafeBitCast($0, to: NativeRun.self)
             }
-            var runWindowsClang: NativeRun?
+            var runWindowsCodegen: NativeRun?
             var windowsLocation: URL?
             var windowsVersion: String?
 
@@ -133,13 +140,13 @@ public final class MobileCompilerEngine: MobileProjectCompiler, @unchecked Senda
                 loadedWindowsHandle = candidateHandle
                 windowsLocation = candidate
 
-                guard let windowsClangSymbol = dlsym(candidateHandle, "xtool_windows_clang_run") else {
-                    throw MobileCompilerEngineError.missingSymbol("xtool_windows_clang_run")
+                guard let codegenSymbol = dlsym(candidateHandle, "xtool_windows_codegen_run") else {
+                    throw MobileCompilerEngineError.missingSymbol("xtool_windows_codegen_run")
                 }
                 guard let windowsCOFFSymbol = dlsym(candidateHandle, "xtool_windows_lld_coff_run") else {
                     throw MobileCompilerEngineError.missingSymbol("xtool_windows_lld_coff_run")
                 }
-                runWindowsClang = unsafeBitCast(windowsClangSymbol, to: NativeRun.self)
+                runWindowsCodegen = unsafeBitCast(codegenSymbol, to: NativeRun.self)
                 runLLDCOFF = unsafeBitCast(windowsCOFFSymbol, to: NativeRun.self)
 
                 if let versionSymbol = dlsym(candidateHandle, "xtool_windows_backend_version") {
@@ -163,7 +170,7 @@ public final class MobileCompilerEngine: MobileProjectCompiler, @unchecked Senda
                 windowsHandle: loadedWindowsHandle,
                 runFrontendFunction: runFrontend,
                 runClangFunction: runClang,
-                runWindowsClangFunction: runWindowsClang,
+                runWindowsCodegenFunction: runWindowsCodegen,
                 runLLDMachOFunction: runLLDMachO,
                 runLLDCOFFFunction: runLLDCOFF,
                 location: location,
@@ -197,31 +204,83 @@ public final class MobileCompilerEngine: MobileProjectCompiler, @unchecked Senda
         )
     }
 
-    /// Routes Windows triples to the isolated X86 backend while ordinary iOS
-    /// Clang jobs continue through the main compiler engine.
+    /// Runs ordinary iOS Clang jobs directly. Windows jobs use the same already
+    /// bundled Clang frontend to emit LLVM bitcode, then hand that bitcode to the
+    /// much smaller X86-only Windows backend for machine-code emission.
     public func runClangFrontend(arguments: [String], diagnosticsURL: URL? = nil) throws -> MobileBuildResult {
         var frontendArguments = arguments
         if frontendArguments.first == "-cc1" {
             frontendArguments.removeFirst()
         }
 
-        let function: NativeRun
-        if Self.isWindowsClangJob(frontendArguments) {
-            guard let runWindowsClangFunction else {
-                throw MobileCompilerEngineError.missingSymbol("xtool_windows_clang_run")
-            }
-            function = runWindowsClangFunction
-        } else {
-            guard let runClangFunction else {
-                throw MobileCompilerEngineError.missingSymbol("xtool_clang_frontend_run")
-            }
-            function = runClangFunction
+        guard let runClangFunction else {
+            throw MobileCompilerEngineError.missingSymbol("xtool_clang_frontend_run")
         }
 
-        return try runNative(
-            arguments: frontendArguments,
-            function: function,
+        guard Self.isWindowsClangJob(frontendArguments) else {
+            return try runNative(
+                arguments: frontendArguments,
+                function: runClangFunction,
+                diagnosticsURL: diagnosticsURL
+            )
+        }
+
+        guard let runWindowsCodegenFunction else {
+            throw MobileCompilerEngineError.missingSymbol("xtool_windows_codegen_run")
+        }
+        guard let objectPath = Self.argumentValue(after: "-o", in: frontendArguments) else {
+            throw MobileCompilerEngineError.invalidWindowsJob("missing -o output path")
+        }
+
+        let triple = Self.windowsTriple(in: frontendArguments) ?? "x86_64-pc-windows-msvc"
+        let bitcodePath = objectPath + ".xtool.bc"
+        var bitcodeArguments = frontendArguments
+
+        // The existing Clang frontend does not need an X86 machine backend to
+        // parse C/C++ and produce LLVM IR. Avoid target-specific optimization
+        // passes here; the isolated X86 TargetMachine performs final lowering.
+        bitcodeArguments.removeAll { argument in
+            argument == "-emit-obj" ||
+            argument == "-emit-llvm" ||
+            argument == "-emit-llvm-bc" ||
+            argument.hasPrefix("-O")
+        }
+        bitcodeArguments.append("-emit-llvm-bc")
+        bitcodeArguments.append("-disable-llvm-passes")
+
+        if let outputIndex = bitcodeArguments.firstIndex(of: "-o"),
+           bitcodeArguments.indices.contains(outputIndex + 1) {
+            bitcodeArguments[outputIndex + 1] = bitcodePath
+        } else {
+            bitcodeArguments.append(contentsOf: ["-o", bitcodePath])
+        }
+
+        let clangResult = try runNative(
+            arguments: bitcodeArguments,
+            function: runClangFunction,
             diagnosticsURL: diagnosticsURL
+        )
+        guard clangResult.succeeded else {
+            return clangResult
+        }
+
+        defer { try? FileManager.default.removeItem(atPath: bitcodePath) }
+        let codegenResult = try runNative(
+            arguments: [bitcodePath, objectPath, triple],
+            function: runWindowsCodegenFunction,
+            diagnosticsURL: diagnosticsURL
+        )
+
+        var combinedError = clangResult.standardError
+        if !combinedError.isEmpty && !codegenResult.standardError.isEmpty {
+            combinedError.append(Data("\n".utf8))
+        }
+        combinedError.append(codegenResult.standardError)
+
+        return MobileBuildResult(
+            standardOutput: clangResult.standardOutput + codegenResult.standardOutput,
+            standardError: combinedError,
+            exitCode: codegenResult.exitCode
         )
     }
 
@@ -280,15 +339,21 @@ public final class MobileCompilerEngine: MobileProjectCompiler, @unchecked Senda
         return result.filter { seen.insert($0.standardizedFileURL.path).inserted }
     }
 
+    private static func argumentValue(after flag: String, in arguments: [String]) -> String? {
+        guard let index = arguments.firstIndex(of: flag) else { return nil }
+        let valueIndex = index + 1
+        guard arguments.indices.contains(valueIndex) else { return nil }
+        return arguments[valueIndex]
+    }
+
+    private static func windowsTriple(in arguments: [String]) -> String? {
+        argumentValue(after: "-triple", in: arguments) ??
+        argumentValue(after: "-target", in: arguments)
+    }
+
     private static func isWindowsClangJob(_ arguments: [String]) -> Bool {
-        for (index, argument) in arguments.enumerated() where argument == "-triple" || argument == "-target" {
-            let targetIndex = arguments.index(arguments.startIndex, offsetBy: index + 1, limitedBy: arguments.endIndex)
-            if let targetIndex, targetIndex < arguments.endIndex {
-                let target = arguments[targetIndex].lowercased()
-                if target.contains("windows") || target.contains("mingw") {
-                    return true
-                }
-            }
+        if let target = windowsTriple(in: arguments)?.lowercased() {
+            return target.contains("windows") || target.contains("mingw")
         }
         return arguments.contains { argument in
             let value = argument.lowercased()
@@ -400,6 +465,7 @@ public enum MobileCompilerEngineError: Error, CustomStringConvertible, Sendable 
     case loadFailed(URL, String)
     case missingSymbol(String)
     case diagnosticCaptureFailed(Int32)
+    case invalidWindowsJob(String)
 
     public var description: String {
         switch self {
@@ -412,6 +478,8 @@ public enum MobileCompilerEngineError: Error, CustomStringConvertible, Sendable 
             return "Compiler engine is missing required symbol: \(symbol)"
         case .diagnosticCaptureFailed(let errorNumber):
             return "Could not capture compiler diagnostics (errno \(errorNumber))"
+        case .invalidWindowsJob(let reason):
+            return "Invalid Windows compiler job: \(reason)"
         }
     }
 }
