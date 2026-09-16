@@ -82,6 +82,12 @@ int32_t runLLD(
     return static_cast<int32_t>(result.retCode);
 }
 
+bool looksLikeCOFFLink(int32_t argc, const char *const *argv) {
+    // XTool's bootstrap probe uses native lld-link syntax. Mach-O/ld64
+    // arguments begin with '-', while COFF driver options begin with '/'.
+    return argc > 0 && argv != nullptr && argv[0] != nullptr && argv[0][0] == '/';
+}
+
 } // namespace
 
 extern "C" int32_t xtool_swift_frontend_run(
@@ -148,6 +154,18 @@ extern "C" int32_t xtool_lld_macho_run(
     int32_t argc,
     const char *const *argv
 ) {
+    // Backwards-compatible bootstrap dispatch: existing XTool UI calls this
+    // entry point for the native linker probe. If it receives lld-link style
+    // '/' options, route them to COFF; ordinary '-' ld64 options remain Mach-O.
+    if (looksLikeCOFFLink(argc, argv)) {
+        return runLLD(
+            argc,
+            argv,
+            "lld-link",
+            {lld::WinLink, &lld::coff::link}
+        );
+    }
+
     return runLLD(
         argc,
         argv,
