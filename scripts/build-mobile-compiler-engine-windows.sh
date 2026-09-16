@@ -13,6 +13,9 @@ set -euo pipefail
 # building/installing the standalone `lld` executable under CMAKE_SYSTEM_NAME=iOS
 # makes CMake treat it as a MACOSX_BUNDLE and fails because no bundle destination
 # is provided.
+#
+# IMPORTANT: unlike the base configure script, this wrapper preserves BUILD_ROOT
+# so an existing AArch64/Swift/Clang object cache survives the Phase 20 reconfigure.
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BASE_SCRIPT="$REPO_ROOT/scripts/build-mobile-compiler-engine.sh"
@@ -49,11 +52,21 @@ if anchor not in text:
     raise SystemExit('error: expected LLVM_BUILD_TOOLS=OFF line not found')
 text = text.replace(anchor, injected, 1)
 
+# The base script intentionally does a clean configure by deleting BUILD_ROOT.
+# That is wrong for Phase 20 because adding X86 should be an in-place CMake
+# reconfigure so already-built AArch64/Swift/Clang objects remain reusable.
+clean_line = '  rm -rf "$BUILD_ROOT" "$PACKAGE_ROOT"\n'
+preserve_line = '  rm -rf "$PACKAGE_ROOT"\n  mkdir -p "$BUILD_ROOT"\n'
+if clean_line not in text:
+    raise SystemExit('error: expected clean configure line not found')
+text = text.replace(clean_line, preserve_line, 1)
+
 path.write_text(text)
 PY
 chmod +x "$GENERATED_SCRIPT"
 
 echo "Phase 20 compiler engine: enabling LLVM targets AArch64 + X86"
 echo "Phase 20 compiler engine: disabling standalone LLD tool (embedded drivers stay enabled)"
+echo "Phase 20 compiler engine: preserving existing build-ios object cache"
 echo "mode: $MODE"
 bash "$GENERATED_SCRIPT" "$MODE"
