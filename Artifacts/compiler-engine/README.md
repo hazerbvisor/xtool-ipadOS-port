@@ -1,10 +1,10 @@
 # Compiler engine backup
 
-Place the known-good compressed compiler engine at:
+The preferred self-contained backup lives at:
 
 `Artifacts/compiler-engine/libXToolCompilerEngine.dylib.zip`
 
-The one-shot XTool Mobile build automatically restores the engine from this ZIP when `.build/mobile-compiler-engine/package/libXToolCompilerEngine.dylib` is missing.
+When `.build/mobile-compiler-engine/package/libXToolCompilerEngine.dylib` is missing, `scripts/build-xtool-mobile-one-shot.sh` automatically calls the recovery helper. The helper tries this repository ZIP first, verifies it, restores the dylib and revision stamp, and skips the LLVM/Clang compiler-engine rebuild.
 
 Expected extracted engine:
 
@@ -15,3 +15,5 @@ Expected extracted engine:
 - format: arm64 Mach-O `MH_DYLIB`
 
 The recovery script refuses to install a backup that fails the Mach-O or SHA-256 checks.
+
+If the repository ZIP is absent, recovery falls back to known-good XTool `.ipa` files under `Artifacts/`.
