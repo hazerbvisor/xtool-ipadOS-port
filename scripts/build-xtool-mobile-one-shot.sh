@@ -108,6 +108,10 @@ run_all() {
   echo "app triple:    $TRIPLE"
   echo
 
+  echo '=== native Clang C++ compatibility ==='
+  bash scripts/fix-mobile-cxx-header-order.sh
+  echo
+
   echo '=== mobile project pipeline checks ==='
   bash scripts/test-mobile-project.sh
   echo
