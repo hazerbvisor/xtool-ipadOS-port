@@ -23,11 +23,11 @@ source = Path(sys.argv[1])
 destination = Path(sys.argv[2])
 text = source.read_text()
 
-old = "    -DLLVM_TARGETS_TO_BUILD=AArch64 \\\n"
-new = "    -DLLVM_TARGETS_TO_BUILD=\"AArch64;X86\" \\\n"
+old = "-DLLVM_TARGETS_TO_BUILD=AArch64"
+new = '-DLLVM_TARGETS_TO_BUILD="AArch64;X86"'
 
 if old not in text:
-    raise SystemExit("error: expected LLVM_TARGETS_TO_BUILD=AArch64 line was not found")
+    raise SystemExit("error: expected LLVM_TARGETS_TO_BUILD=AArch64 setting was not found")
 
 text = text.replace(old, new, 1)
 text = text.replace(
