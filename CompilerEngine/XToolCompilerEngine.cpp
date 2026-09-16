@@ -20,6 +20,7 @@
 #define XTOOL_COMPILER_ENGINE_VERSION "swift-frontend-engine"
 #endif
 
+LLD_HAS_DRIVER(coff)
 LLD_HAS_DRIVER(macho)
 
 namespace {
@@ -46,6 +47,40 @@ void initializeSwiftCompilerModulesOnce() {
 }
 
 std::atomic<bool> gLLDCanRunAgain{true};
+
+int32_t runLLD(
+    int32_t argc,
+    const char *const *argv,
+    const char *driverName,
+    lld::DriverDef driver
+) {
+    if (argc < 0 || (argc > 0 && argv == nullptr)) {
+        return 64;
+    }
+
+    if (!gLLDCanRunAgain.load(std::memory_order_acquire)) {
+        llvm::errs() << "xtool: embedded LLD cannot safely be re-entered after the previous link\n";
+        return 70;
+    }
+
+    llvm::SmallVector<const char *, 32> arguments;
+    arguments.push_back(driverName);
+    arguments.append(argv, argv + static_cast<size_t>(argc));
+
+    const lld::DriverDef drivers[] = {driver};
+    const lld::Result result = lld::lldMain(
+        arguments,
+        llvm::outs(),
+        llvm::errs(),
+        drivers
+    );
+
+    if (!result.canRunAgain) {
+        gLLDCanRunAgain.store(false, std::memory_order_release);
+    }
+
+    return static_cast<int32_t>(result.retCode);
+}
 
 } // namespace
 
@@ -113,37 +148,24 @@ extern "C" int32_t xtool_lld_macho_run(
     int32_t argc,
     const char *const *argv
 ) {
-    if (argc < 0 || (argc > 0 && argv == nullptr)) {
-        return 64;
-    }
-
-    if (!gLLDCanRunAgain.load(std::memory_order_acquire)) {
-        llvm::errs() << "xtool: embedded LLD cannot safely be re-entered after the previous link\n";
-        return 70;
-    }
-
-    // lldMain expects argv[0] to identify the driver. Keep that implementation
-    // detail out of the stable C ABI exposed to Swift.
-    llvm::SmallVector<const char *, 32> arguments;
-    arguments.push_back("ld64.lld");
-    arguments.append(argv, argv + static_cast<size_t>(argc));
-
-    const lld::DriverDef drivers[] = {
-        {lld::Darwin, &lld::macho::link},
-    };
-
-    const lld::Result result = lld::lldMain(
-        arguments,
-        llvm::outs(),
-        llvm::errs(),
-        drivers
+    return runLLD(
+        argc,
+        argv,
+        "ld64.lld",
+        {lld::Darwin, &lld::macho::link}
     );
+}
 
-    if (!result.canRunAgain) {
-        gLLDCanRunAgain.store(false, std::memory_order_release);
-    }
-
-    return static_cast<int32_t>(result.retCode);
+extern "C" int32_t xtool_lld_coff_run(
+    int32_t argc,
+    const char *const *argv
+) {
+    return runLLD(
+        argc,
+        argv,
+        "lld-link",
+        {lld::WinLink, &lld::coff::link}
+    );
 }
 
 extern "C" const char *xtool_compiler_engine_version(void) {
