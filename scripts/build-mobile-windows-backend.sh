@@ -15,9 +15,8 @@ TARGET="arm64-apple-ios${DEPLOYMENT}"
 JOBS="${XTOOL_WINDOWS_JOBS:-${XTOOL_COMPILER_JOBS:-2}}"
 BACKEND_DYLIB="$PACKAGE_ROOT/libXToolWindowsBackend.dylib"
 
-# Reuse the main compiler checkout when available. This avoids downloading the
-# Swift LLVM fork twice, but the Windows backend has its own independent CMake
-# graph and never builds Swift itself.
+# Reuse the existing source checkout if possible, but this build has a separate
+# CMake graph and enables only LLVM + LLD. It does NOT configure Swift or Clang.
 DEFAULT_SHARED_LLVM="$ROOT/.build/mobile-compiler-engine/src/llvm-project"
 LLVM_SOURCE="${XTOOL_LLVM_SOURCE:-$DEFAULT_SHARED_LLVM}"
 if [[ ! -d "$LLVM_SOURCE/.git" ]]; then
@@ -50,7 +49,6 @@ CLANGXX="$(find_exec clang++ /opt/swift/usr/bin/clang++ /usr/bin/clang++ /data/d
 LLVM_AR="$(find_exec llvm-ar /opt/swift/usr/bin/llvm-ar /usr/bin/llvm-ar /data/data/com.termux/files/usr/bin/llvm-ar "$(command -v llvm-ar 2>/dev/null || true)")"
 LLVM_RANLIB="$(find_exec llvm-ranlib /opt/swift/usr/bin/llvm-ranlib /usr/bin/llvm-ranlib /data/data/com.termux/files/usr/bin/llvm-ranlib "$(command -v llvm-ranlib 2>/dev/null || true)")"
 LLVM_TBLGEN="$(find_exec llvm-tblgen /opt/swift/usr/bin/llvm-tblgen /usr/bin/llvm-tblgen /data/data/com.termux/files/usr/bin/llvm-tblgen "$(command -v llvm-tblgen 2>/dev/null || true)")"
-CLANG_TBLGEN="$(find_exec clang-tblgen /opt/swift/usr/bin/clang-tblgen /usr/bin/clang-tblgen /data/data/com.termux/files/usr/bin/clang-tblgen "$(command -v clang-tblgen 2>/dev/null || true)")"
 NINJA="$(find_exec ninja /usr/bin/ninja /data/data/com.termux/files/usr/bin/ninja "$(command -v ninja 2>/dev/null || true)")"
 CMAKE="$(find_exec cmake /usr/bin/cmake /data/data/com.termux/files/usr/bin/cmake "$(command -v cmake 2>/dev/null || true)")"
 INSTALL_NAME_TOOL="$(find_exec llvm-install-name-tool /opt/swift/usr/bin/llvm-install-name-tool /usr/bin/llvm-install-name-tool /data/data/com.termux/files/usr/bin/llvm-install-name-tool "$(command -v llvm-install-name-tool 2>/dev/null || true)")"
@@ -61,7 +59,7 @@ prepare_source() {
     return 0
   fi
   mkdir -p "$(dirname "$LLVM_SOURCE")"
-  echo "Cloning LLVM/Clang/LLD @ $TAG ..."
+  echo "Cloning LLVM/LLD @ $TAG ..."
   git -c http.version=HTTP/1.1 clone --depth 1 --single-branch --branch "$TAG" \
     https://github.com/swiftlang/llvm-project.git "$LLVM_SOURCE"
 }
@@ -69,7 +67,6 @@ prepare_source() {
 prepare_native_tools() {
   mkdir -p "$NATIVE_ROOT/bin"
   ln -sfn "$LLVM_TBLGEN" "$NATIVE_ROOT/bin/llvm-tblgen"
-  ln -sfn "$CLANG_TBLGEN" "$NATIVE_ROOT/bin/clang-tblgen"
 }
 
 configure_backend() {
@@ -86,7 +83,9 @@ configure_backend() {
   echo "host dylib target:  $TARGET"
   echo "LLVM codegen:       X86 only"
   echo "Windows linker:     lldCOFF"
+  echo "Clang project:      NOT INCLUDED"
   echo "Swift project:      NOT INCLUDED"
+  echo "input from XTool:   LLVM bitcode"
   echo "SDK:                $IOS_SDK"
   echo "LLVM source:        $LLVM_SOURCE"
   echo "build dir:          $BUILD_ROOT"
@@ -118,14 +117,13 @@ configure_backend() {
     -DCMAKE_INSTALL_NAME_TOOL="$INSTALL_NAME_TOOL" \
     -DBUILD_SHARED_LIBS=OFF \
     -DBUILD_TESTING=OFF \
-    -DLLVM_ENABLE_PROJECTS="clang;lld" \
+    -DLLVM_ENABLE_PROJECTS="lld" \
     -DLLVM_EXTERNAL_PROJECTS="xtoolwindows" \
     -DLLVM_EXTERNAL_XTOOLWINDOWS_SOURCE_DIR="$ROOT/WindowsBackend" \
     -DLLVM_TARGETS_TO_BUILD=X86 \
     -DLLVM_HOST_TRIPLE="$TARGET" \
     -DLLVM_DEFAULT_TARGET_TRIPLE="$TARGET" \
     -DLLVM_TABLEGEN="$LLVM_TBLGEN" \
-    -DCLANG_TABLEGEN="$CLANG_TBLGEN" \
     -DLLVM_BUILD_TOOLS=OFF \
     -DLLD_BUILD_TOOLS=OFF \
     -DLLVM_BUILD_UTILS=OFF \
@@ -135,7 +133,6 @@ configure_backend() {
     -DLLVM_LINK_LLVM_DYLIB=OFF \
     -DLLVM_ENABLE_ASSERTIONS=OFF \
     -DLLVM_INCLUDE_TESTS=OFF \
-    -DCLANG_INCLUDE_TESTS=OFF \
     -DLLD_INCLUDE_TESTS=OFF \
     -DLLVM_INCLUDE_BENCHMARKS=OFF \
     -DLLVM_INCLUDE_EXAMPLES=OFF \
@@ -145,17 +142,11 @@ configure_backend() {
     -DLLVM_ENABLE_TERMINFO=OFF \
     -DLLVM_ENABLE_ZLIB=OFF \
     -DLLVM_ENABLE_ZSTD=OFF \
-    -DCLANG_BUILD_TOOLS=OFF \
-    -DCLANG_TOOL_LIBCLANG_BUILD=OFF \
-    -DCLANG_TOOL_INDEXSTORE_BUILD=OFF \
-    -DCLANG_TOOL_CLANG_SHLIB_BUILD=OFF \
-    -DCLANG_ENABLE_ARCMT=OFF \
-    -DCLANG_ENABLE_STATIC_ANALYZER=OFF \
     "${extra_linker[@]}"
 
   section "configuration result"
   echo "CMake configuration completed."
-  echo "Ninja work items for the isolated target:"
+  echo "Ninja work items for LLVM-bitcode -> X86 COFF backend:"
   "$NINJA" -C "$BUILD_ROOT" -n XToolWindowsBackend 2>/dev/null | tail -n 1 || true
   echo "Next: bash scripts/build-mobile-windows-backend.sh build"
 }
