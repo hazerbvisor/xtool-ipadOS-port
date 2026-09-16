@@ -7,11 +7,12 @@ ENGINE="$WORK_ROOT/package/libXToolCompilerEngine.dylib"
 STAMP="$WORK_ROOT/.xtool-compiler-engine-rev"
 REVISION="clang-lld-swiftmodules-v6"
 KNOWN_GOOD_SHA256="5a5d08891aa712661eb602296e4d64acb41b67c0bbccb12c2cd9d9ab186aabfa"
-MEMBER="Payload/XToolMobileApp.app/Frameworks/libXToolCompilerEngine.dylib"
+IPA_MEMBER="Payload/XToolMobileApp.app/Frameworks/libXToolCompilerEngine.dylib"
+REPO_ZIP="$ROOT/Artifacts/compiler-engine/libXToolCompilerEngine.dylib.zip"
 
 mkdir -p "$(dirname "$ENGINE")"
 
-python3 - "$ROOT" "$ENGINE" "$STAMP" "$REVISION" "$KNOWN_GOOD_SHA256" "$MEMBER" "${1:-}" <<'PY'
+python3 - "$ROOT" "$ENGINE" "$STAMP" "$REVISION" "$KNOWN_GOOD_SHA256" "$IPA_MEMBER" "$REPO_ZIP" "${1:-}" <<'PY'
 from __future__ import annotations
 
 from pathlib import Path
@@ -27,8 +28,9 @@ engine = Path(sys.argv[2])
 stamp = Path(sys.argv[3])
 revision = sys.argv[4]
 known_good_sha = sys.argv[5].lower()
-member = sys.argv[6]
-explicit = sys.argv[7]
+ipa_member = sys.argv[6]
+repo_zip = Path(sys.argv[7])
+explicit = sys.argv[8]
 
 
 def valid_macho_dylib(path: Path) -> tuple[bool, str]:
@@ -58,44 +60,46 @@ def digest(path: Path) -> str:
     return h.hexdigest()
 
 
-candidates: list[Path] = []
-if explicit:
-    candidates.append(Path(explicit).expanduser())
-else:
-    artifacts = root / "Artifacts"
-    if artifacts.is_dir():
-        candidates.extend(sorted(artifacts.glob("*.ipa"), key=lambda p: p.stat().st_mtime, reverse=True))
-        candidates.extend(sorted(artifacts.glob("*/*.ipa"), key=lambda p: p.stat().st_mtime, reverse=True))
+def install_temp(tmp_path: Path, source_label: str) -> bool:
+    ok, description = valid_macho_dylib(tmp_path)
+    if not ok:
+        print(f"  skip: extracted engine is invalid ({description})")
+        return False
 
-if not candidates:
-    print("No backup IPA found. Put a known-good XToolMobileApp IPA under Artifacts/ or pass its path explicitly.")
-    raise SystemExit(1)
+    sha = digest(tmp_path)
+    size = tmp_path.stat().st_size
+    if sha != known_good_sha:
+        print(f"  skip: engine SHA-256 {sha} does not match known-good backup {known_good_sha}")
+        return False
 
-seen: set[Path] = set()
-for ipa in candidates:
+    os.chmod(tmp_path, 0o755)
+    os.replace(tmp_path, engine)
+    stamp.write_text(revision + "\n")
+    print(f"Recovered compiler engine from {source_label}: {engine}")
+    print(f"Engine format: {description}")
+    print(f"Engine size: {size} bytes")
+    print(f"Engine SHA-256: {sha}")
+    print(f"Engine revision stamp: {revision}")
+    return True
+
+
+def extract_zip_member(archive_path: Path, members: list[str], source_label: str) -> bool:
+    if not archive_path.is_file():
+        return False
+    print(f"Checking compiler engine backup: {archive_path}")
     try:
-        ipa = ipa.resolve()
-    except OSError:
-        pass
-    if ipa in seen:
-        continue
-    seen.add(ipa)
-    if not ipa.is_file():
-        print(f"Skipping missing IPA: {ipa}")
-        continue
-
-    print(f"Checking backup IPA: {ipa}")
-    try:
-        with zipfile.ZipFile(ipa) as archive:
-            try:
-                info = archive.getinfo(member)
-            except KeyError:
-                print(f"  skip: missing {member}")
-                continue
+        with zipfile.ZipFile(archive_path) as archive:
+            names = archive.namelist()
+            selected = next((m for m in members if m in names), None)
+            if selected is None:
+                selected = next((n for n in names if Path(n).name == "libXToolCompilerEngine.dylib"), None)
+            if selected is None:
+                print("  skip: compiler engine dylib not found in archive")
+                return False
+            info = archive.getinfo(selected)
             if info.file_size <= 0:
                 print("  skip: embedded compiler engine is empty")
-                continue
-
+                return False
             with tempfile.NamedTemporaryFile(
                 prefix="libXToolCompilerEngine.", suffix=".dylib", delete=False, dir=engine.parent
             ) as tmp:
@@ -107,36 +111,39 @@ for ipa in candidates:
                             break
                         tmp.write(block)
     except (OSError, zipfile.BadZipFile, RuntimeError) as exc:
-        print(f"  skip: unreadable/corrupt IPA ({exc})")
-        continue
+        print(f"  skip: unreadable/corrupt archive ({exc})")
+        return False
 
     try:
-        ok, description = valid_macho_dylib(tmp_path)
-        if not ok:
-            print(f"  skip: extracted engine is invalid ({description})")
-            tmp_path.unlink(missing_ok=True)
-            continue
-
-        sha = digest(tmp_path)
-        size = tmp_path.stat().st_size
-        if sha != known_good_sha:
-            print(f"  skip: engine SHA-256 {sha} does not match known-good backup {known_good_sha}")
-            tmp_path.unlink(missing_ok=True)
-            continue
-
-        os.chmod(tmp_path, 0o755)
-        os.replace(tmp_path, engine)
-        stamp.write_text(revision + "\n")
-        print(f"Recovered compiler engine: {engine}")
-        print(f"Engine format: {description}")
-        print(f"Engine size: {size} bytes")
-        print(f"Engine SHA-256: {sha}")
-        print(f"Engine revision stamp: {revision}")
-        raise SystemExit(0)
+        return install_temp(tmp_path, source_label)
     finally:
         if tmp_path.exists() and tmp_path != engine:
             tmp_path.unlink(missing_ok=True)
 
-print("No known-good compiler engine could be recovered from the available IPA files.")
+
+# Explicit archive path wins when supplied.
+if explicit:
+    path = Path(explicit).expanduser()
+    members = [ipa_member] if path.suffix.lower() == ".ipa" else ["libXToolCompilerEngine.dylib"]
+    if extract_zip_member(path, members, str(path)):
+        raise SystemExit(0)
+    raise SystemExit(1)
+
+# Preferred path: a compressed backup tracked with the repository.
+if extract_zip_member(repo_zip, ["libXToolCompilerEngine.dylib"], "repo backup ZIP"):
+    raise SystemExit(0)
+
+# Fallback path: recover from any known-good XTool IPA under Artifacts/.
+candidates: list[Path] = []
+artifacts = root / "Artifacts"
+if artifacts.is_dir():
+    candidates.extend(sorted(artifacts.glob("*.ipa"), key=lambda p: p.stat().st_mtime, reverse=True))
+    candidates.extend(sorted(artifacts.glob("*/*.ipa"), key=lambda p: p.stat().st_mtime, reverse=True))
+
+for ipa in candidates:
+    if extract_zip_member(ipa, [ipa_member], str(ipa)):
+        raise SystemExit(0)
+
+print("No known-good compiler engine backup found in the repo ZIP or Artifacts/ IPAs.")
 raise SystemExit(1)
 PY
