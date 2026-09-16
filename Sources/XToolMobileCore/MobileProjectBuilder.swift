@@ -189,8 +189,23 @@ public enum MobileProjectBuilder {
                         "-mrelocation-model", "pic",
                         "-pic-level", "2",
                         "-fblocks",
+                        // XTool invokes Clang's frontend directly instead of the driver.
+                        // Match the driver's Darwin/GCC compatibility macros so Apple
+                        // SDK headers don't reject the compiler or hide C declarations.
+                        "-fgnuc-version=4.2.1",
                         "-O0",
                     ]
+                    // Match Apple's Clang C++ header search order. libc++ must come
+                    // before Clang's builtin wrappers and the SDK C headers because
+                    // libc++ compatibility wrappers use #include_next to reach them.
+                    if language.contains("++") {
+                        args += [
+                            "-std=c++17",
+                            "-fcxx-exceptions",
+                            "-fexceptions",
+                            "-internal-isystem", sdk.sdkURL.appendingPathComponent("usr/include/c++/v1").path,
+                        ]
+                    }
                     if let clang = sdk.clangBuiltinHeaders {
                         args += [
                             "-resource-dir", clang.deletingLastPathComponent().path,
@@ -201,14 +216,6 @@ public enum MobileProjectBuilder {
                         "-internal-isystem", sdk.sdkURL.appendingPathComponent("usr/include").path,
                         "-iframework", sdk.sdkURL.appendingPathComponent("System/Library/Frameworks").path,
                     ]
-                    if language.contains("++") {
-                        args += [
-                            "-std=c++17",
-                            "-fcxx-exceptions",
-                            "-fexceptions",
-                            "-internal-isystem", sdk.sdkURL.appendingPathComponent("usr/include/c++/v1").path,
-                        ]
-                    }
                     if language.hasPrefix("objective-c") {
                         args += ["-fobjc-runtime=ios-\(manifest.deploymentTarget)", "-fobjc-arc"]
                     }
