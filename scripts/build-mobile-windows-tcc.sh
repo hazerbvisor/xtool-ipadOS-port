@@ -52,16 +52,29 @@ prepare_source() {
 
   if [[ ! -d "$TCC_SRC/.git" ]]; then
     rm -rf "$TCC_SRC"
-    echo "Cloning TinyCC..."
+    echo "Cloning TinyCC metadata..."
     git -c http.version=HTTP/1.1 clone --filter=blob:none --no-checkout \
       "$TCC_REPOSITORY" "$TCC_SRC"
   fi
 
-  if [[ "$(git -C "$TCC_SRC" rev-parse HEAD 2>/dev/null || true)" != "$TCC_COMMIT" ]]; then
-    echo "Checking out pinned TinyCC $TCC_COMMIT ..."
+  # A --no-checkout clone can already have HEAD pointing at the requested
+  # commit while the working tree is completely empty. Check the commit object
+  # and the actual source files independently.
+  if ! git -C "$TCC_SRC" cat-file -e "$TCC_COMMIT^{commit}" 2>/dev/null; then
+    echo "Fetching pinned TinyCC $TCC_COMMIT ..."
     git -C "$TCC_SRC" fetch --depth 1 origin "$TCC_COMMIT"
-    git -C "$TCC_SRC" checkout --detach "$TCC_COMMIT"
   fi
+
+  local current
+  current="$(git -C "$TCC_SRC" rev-parse HEAD 2>/dev/null || true)"
+  if [[ "$current" != "$TCC_COMMIT" || ! -f "$TCC_SRC/libtcc.c" || ! -f "$TCC_SRC/tccpe.c" ]]; then
+    echo "Materializing pinned TinyCC working tree $TCC_COMMIT ..."
+    git -C "$TCC_SRC" checkout --detach --force "$TCC_COMMIT"
+  fi
+
+  [[ -f "$TCC_SRC/libtcc.c" ]] || die "TinyCC checkout is missing libtcc.c after checkout"
+  [[ -f "$TCC_SRC/tccpe.c" ]] || die "TinyCC checkout is missing tccpe.c after checkout"
+  [[ -f "$TCC_SRC/VERSION" ]] || die "TinyCC checkout is missing VERSION after checkout"
 
   echo "TinyCC: $(git -C "$TCC_SRC" rev-parse --short=12 HEAD)"
 }
