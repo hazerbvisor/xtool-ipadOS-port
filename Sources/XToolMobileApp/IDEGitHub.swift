@@ -305,6 +305,12 @@ final class IDEGitHubClient: ObservableObject {
             throw MobileProjectBuildError.invalid("Repository tree is too large for snapshot import")
         }
         let entries = treeEntries.filter { $0["type"] as? String != "tree" }
+        let oversizedPaths = Set(
+            entries.compactMap { entry -> String? in
+                guard (entry["size"] as? Int ?? 0) > 20_000_000 else { return nil }
+                return entry["path"] as? String
+            }
+        )
         let totalBytes = entries.reduce(0) { $0 + ($1["size"] as? Int ?? 0) }
         guard entries.count <= 2000,
               totalBytes <= 200_000_000,
@@ -337,6 +343,10 @@ final class IDEGitHubClient: ObservableObject {
 
         let changed = Set(remote.keys)
             .union(baseline.keys)
+            // Snapshot sync intentionally leaves very large tracked blobs alone. This keeps
+            // repository backups/artifacts local without forcing GitHub's base64 blob API
+            // through the iPad process. Existing local copies are preserved.
+            .filter { !oversizedPaths.contains($0) }
             .filter { remote[$0]?.sha != baseline[$0]?.sha }
             .sorted()
         let fm = FileManager.default
@@ -425,7 +435,11 @@ final class IDEGitHubClient: ObservableObject {
             throw error
         }
 
-        status = "Updated \(changed.count) files at \(commitSHA.prefix(8)). Local-only changes preserved."
+        if oversizedPaths.isEmpty {
+            status = "Updated \(changed.count) files at \(commitSHA.prefix(8)). Local-only changes preserved."
+        } else {
+            status = "Updated \(changed.count) files at \(commitSHA.prefix(8)). Skipped \(oversizedPaths.count) tracked blob(s) over 20 MB; existing local copies preserved."
+        }
     }
 
     func perform(repository: String, branch: String, root: URL, completion: @escaping (URL) -> Void) {
