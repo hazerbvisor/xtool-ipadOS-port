@@ -171,19 +171,71 @@ enum MobileBinaryFrameworkResolver {
             )
         }
 
-        let framework = xcframework
+        let root = xcframework.standardizedFileURL
+        let sliceRoot = xcframework
             .appendingPathComponent(identifier, isDirectory: true)
+            .standardizedFileURL
+        let libraryURL = sliceRoot
             .appendingPathComponent(libraryPath)
             .standardizedFileURL
-        let root = xcframework.standardizedFileURL
-        guard framework.path.hasPrefix(root.path + "/"),
-              framework.pathExtension.lowercased() == "framework",
-              fileManager.fileExists(atPath: framework.path) else {
+        guard libraryURL.path.hasPrefix(root.path + "/"),
+              fileManager.fileExists(atPath: libraryURL.path) else {
             throw MobileProjectBuildError.invalid(
-                "XCFramework slice for \(expectedName) is not a usable .framework"
+                "XCFramework slice for \(expectedName) points to a missing library"
             )
         }
-        return framework
+
+        if libraryURL.pathExtension.lowercased() == "framework" {
+            return libraryURL
+        }
+
+        // SwiftPM binary targets frequently ship static XCFramework slices as a
+        // .a plus HeadersPath (for example CArchive/libarchive). The rest of
+        // XTool Mobile already understands framework search/link flags, so wrap
+        // the selected static archive in a small framework-shaped directory.
+        // The binary remains a static archive; this only supplies the standard
+        // Framework/Headers layout expected by Clang and LLD.
+        if libraryURL.pathExtension.lowercased() == "a" {
+            guard let headersPath = library["HeadersPath"] as? String,
+                  !headersPath.isEmpty else {
+                throw MobileProjectBuildError.invalid(
+                    "Static XCFramework slice for \(expectedName) has no HeadersPath"
+                )
+            }
+            let headersURL = sliceRoot
+                .appendingPathComponent(headersPath, isDirectory: true)
+                .standardizedFileURL
+            guard headersURL.path.hasPrefix(sliceRoot.path + "/") else {
+                throw MobileProjectBuildError.invalid(
+                    "Static XCFramework headers escaped the selected slice for \(expectedName)"
+                )
+            }
+            var isDirectory: ObjCBool = false
+            guard fileManager.fileExists(atPath: headersURL.path, isDirectory: &isDirectory),
+                  isDirectory.boolValue else {
+                throw MobileProjectBuildError.invalid(
+                    "Static XCFramework headers are missing for \(expectedName)"
+                )
+            }
+
+            let wrapperRoot = sliceRoot.appendingPathComponent("XToolStaticFrameworks", isDirectory: true)
+            let framework = wrapperRoot.appendingPathComponent("\(expectedName).framework", isDirectory: true)
+            let frameworkBinary = framework.appendingPathComponent(expectedName)
+            let frameworkHeaders = framework.appendingPathComponent("Headers", isDirectory: true)
+
+            try fileManager.createDirectory(at: wrapperRoot, withIntermediateDirectories: true)
+            if fileManager.fileExists(atPath: framework.path) {
+                try fileManager.removeItem(at: framework)
+            }
+            try fileManager.createDirectory(at: framework, withIntermediateDirectories: true)
+            try fileManager.copyItem(at: libraryURL, to: frameworkBinary)
+            try fileManager.copyItem(at: headersURL, to: frameworkHeaders)
+            return framework
+        }
+
+        throw MobileProjectBuildError.invalid(
+            "XCFramework slice for \(expectedName) is neither a .framework nor a static .a library"
+        )
     }
 }
 
