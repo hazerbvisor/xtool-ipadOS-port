@@ -311,32 +311,14 @@ private enum MobileZIPExtractor {
 
         let fm = FileManager.default
         let root = destination.standardizedFileURL
-        for entry in entries {
-            guard (entry.flags & 0x0001) == 0 else {
-                throw MobileProjectBuildError.invalid("Encrypted ZIP entries are not supported")
-            }
-            let components = entry.path.split(separator: "/", omittingEmptySubsequences: false)
-            guard !entry.path.hasPrefix("/"), !entry.path.contains("\\"),
-                  !components.contains(where: { $0 == ".." || $0 == "." }) else {
-                throw MobileProjectBuildError.invalid("Unsafe path in binary archive: \(entry.path)")
-            }
 
-            let unixMode = UInt16((entry.externalAttributes >> 16) & 0xffff)
-            let fileType = unixMode & 0o170000
-            guard fileType != 0o120000 else {
-                throw MobileProjectBuildError.invalid("Symlinks are not allowed in binary framework archives")
-            }
+        struct DeferredSymlink {
+            let path: String
+            let output: URL
+            let target: URL
+        }
 
-            let output = root.appendingPathComponent(entry.path).standardizedFileURL
-            guard output.path == root.path || output.path.hasPrefix(root.path + "/") else {
-                throw MobileProjectBuildError.invalid("Unsafe path in binary archive: \(entry.path)")
-            }
-            let isDirectory = entry.path.hasSuffix("/") || fileType == 0o040000
-            if isDirectory {
-                try fm.createDirectory(at: output, withIntermediateDirectories: true)
-                continue
-            }
-
+        func decodedPayload(for entry: Entry) throws -> Data {
             let local = entry.localHeaderOffset
             guard local + 30 <= bytes.count, read32(bytes, local) == 0x04034b50 else {
                 throw MobileProjectBuildError.invalid("Corrupt ZIP local header for \(entry.path)")
@@ -364,8 +346,96 @@ private enum MobileZIPExtractor {
             guard decoded.count == entry.uncompressedSize else {
                 throw MobileProjectBuildError.invalid("ZIP size mismatch for \(entry.path)")
             }
+            return decoded
+        }
+
+        var deferredSymlinks: [DeferredSymlink] = []
+        for entry in entries {
+            guard (entry.flags & 0x0001) == 0 else {
+                throw MobileProjectBuildError.invalid("Encrypted ZIP entries are not supported")
+            }
+            let components = entry.path.split(separator: "/", omittingEmptySubsequences: false)
+            guard !entry.path.hasPrefix("/"), !entry.path.contains("\\"),
+                  !components.contains(where: { $0 == ".." || $0 == "." }) else {
+                throw MobileProjectBuildError.invalid("Unsafe path in binary archive: \(entry.path)")
+            }
+
+            let unixMode = UInt16((entry.externalAttributes >> 16) & 0xffff)
+            let fileType = unixMode & 0o170000
+            let output = root.appendingPathComponent(entry.path).standardizedFileURL
+            guard output.path == root.path || output.path.hasPrefix(root.path + "/") else {
+                throw MobileProjectBuildError.invalid("Unsafe path in binary archive: \(entry.path)")
+            }
+
+            if fileType == 0o120000 {
+                let decoded = try decodedPayload(for: entry)
+                guard let targetText = String(data: decoded, encoding: .utf8),
+                      !targetText.isEmpty,
+                      !targetText.hasPrefix("/"),
+                      !targetText.contains("\\") else {
+                    throw MobileProjectBuildError.invalid(
+                        "Unsafe symlink target in binary framework archive: \(entry.path)"
+                    )
+                }
+                let target = output.deletingLastPathComponent()
+                    .appendingPathComponent(targetText)
+                    .standardizedFileURL
+                guard target.path.hasPrefix(root.path + "/") else {
+                    throw MobileProjectBuildError.invalid(
+                        "Symlink target escaped binary framework archive: \(entry.path)"
+                    )
+                }
+                deferredSymlinks.append(
+                    DeferredSymlink(path: entry.path, output: output, target: target)
+                )
+                continue
+            }
+
+            let isDirectory = entry.path.hasSuffix("/") || fileType == 0o040000
+            if isDirectory {
+                try fm.createDirectory(at: output, withIntermediateDirectories: true)
+                continue
+            }
+
+            let decoded = try decodedPayload(for: entry)
             try fm.createDirectory(at: output.deletingLastPathComponent(), withIntermediateDirectories: true)
             try decoded.write(to: output, options: .atomic)
+        }
+
+        // Apple XCFramework release archives commonly preserve framework-layout
+        // symlinks (for example Versions/Current). iPadOS project imports do not
+        // need those links to remain links, so materialize only archive-internal
+        // targets after all regular entries have been extracted. This keeps the
+        // path traversal protections above while accepting standard frameworks.
+        var pending = deferredSymlinks
+        while !pending.isEmpty {
+            var unresolved: [DeferredSymlink] = []
+            var madeProgress = false
+
+            for link in pending {
+                var isDirectory: ObjCBool = false
+                guard fm.fileExists(atPath: link.target.path, isDirectory: &isDirectory) else {
+                    unresolved.append(link)
+                    continue
+                }
+
+                try fm.createDirectory(
+                    at: link.output.deletingLastPathComponent(),
+                    withIntermediateDirectories: true
+                )
+                if fm.fileExists(atPath: link.output.path) {
+                    try fm.removeItem(at: link.output)
+                }
+                try fm.copyItem(at: link.target, to: link.output)
+                madeProgress = true
+            }
+
+            guard madeProgress || unresolved.isEmpty else {
+                throw MobileProjectBuildError.invalid(
+                    "Unresolved symlink in binary framework archive: \(unresolved[0].path)"
+                )
+            }
+            pending = unresolved
         }
     }
 
