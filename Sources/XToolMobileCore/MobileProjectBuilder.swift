@@ -399,25 +399,40 @@ public enum MobileProjectBuilder {
             for resource in manifest.resources ?? [] {
                 let origin = try input(resource.path)
                 let directory = (try origin.resourceValues(forKeys: [.isDirectoryKey])).isDirectory == true
+                let canonicalOrigin = origin.resolvingSymlinksInPath().standardizedFileURL
+
                 for file in try MobileProjectPaths.files(resource.path, root: project.root) {
-                    if ["xcassets", "storyboard", "xib"].contains(file.pathExtension)
-                        || file.path.contains(".xcassets/") {
+                    let canonicalFile = file.resolvingSymlinksInPath().standardizedFileURL
+                    if ["xcassets", "storyboard", "xib"].contains(canonicalFile.pathExtension)
+                        || canonicalFile.path.contains(".xcassets/") {
                         throw MobileProjectBuildError.invalid(
-                            "Compile asset catalogs/storyboards on the host before importing: \(file.lastPathComponent)"
+                            "Compile asset catalogs/storyboards on the host before importing: \(canonicalFile.lastPathComponent)"
                         )
                     }
-                    let suffix = directory
-                        ? String(file.path.dropFirst(origin.path.count + 1))
-                        : ""
+
+                    let suffix: String
+                    if directory {
+                        guard canonicalFile.path.hasPrefix(canonicalOrigin.path + "/") else {
+                            throw MobileProjectBuildError.invalid(
+                                "Resource escaped its declared directory: \(resource.path)"
+                            )
+                        }
+                        suffix = String(
+                            canonicalFile.path.dropFirst(canonicalOrigin.path.count + 1)
+                        )
+                    } else {
+                        suffix = ""
+                    }
+
                     let destination = suffix.isEmpty
                         ? resource.destination
                         : resource.destination + "/" + suffix
                     files.append(
                         MobileIPAFile(
-                            sourceURL: file,
+                            sourceURL: canonicalFile,
                             relativePath: destination,
-                            isExecutable: file.pathExtension == "dylib"
-                                || fm.isExecutableFile(atPath: file.path)
+                            isExecutable: canonicalFile.pathExtension == "dylib"
+                                || fm.isExecutableFile(atPath: canonicalFile.path)
                         )
                     )
                 }

@@ -400,6 +400,19 @@ private enum MobileZIPExtractor {
             let decoded = try decodedPayload(for: entry)
             try fm.createDirectory(at: output.deletingLastPathComponent(), withIntermediateDirectories: true)
             try decoded.write(to: output, options: .atomic)
+
+            // Data.write creates regular files with the process default mode
+            // (typically 0644), which strips executable bits from framework
+            // binaries such as Foo.framework/Foo. Preserve the UNIX permission
+            // bits recorded in the ZIP central directory so embedded dynamic
+            // frameworks remain installable and loadable on iOS.
+            let permissions = Int(unixMode & 0o7777)
+            if permissions != 0 {
+                try fm.setAttributes(
+                    [.posixPermissions: permissions],
+                    ofItemAtPath: output.path
+                )
+            }
         }
 
         // Apple XCFramework release archives commonly preserve framework-layout
