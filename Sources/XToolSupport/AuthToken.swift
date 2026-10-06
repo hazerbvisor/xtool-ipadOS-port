@@ -21,7 +21,19 @@ enum AuthToken: Codable, CustomStringConvertible {
     case xcode(Xcode)
 
     var description: String {
-        "Authentication details hidden."
+        switch self {
+        case .appStoreConnect(let data):
+            """
+            - ASC key ID: \(data.id)
+            - Issuer ID: \(data.issuerID)
+            """
+        case .xcode(let data):
+            """
+            - Apple ID: \(data.appleID)
+            - Team ID: \(data.teamID)
+            - Token expiry: \(data.expiry.formatted(.dateTime))
+            """
+        }
     }
 }
 
