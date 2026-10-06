@@ -27,7 +27,7 @@ struct AuthOperation {
     func run() async throws {
         if let token = try? AuthToken.saved(), !logoutFromExisting {
             if !quiet {
-                print("Logged in.\n\(token)")
+                print("Logged in.")
             }
             return
         }
@@ -52,7 +52,7 @@ struct AuthOperation {
         }
         try token.save()
 
-        print("Logged in.\n\(token)")
+        print("Logged in.")
     }
 
     private func logInWithKey() async throws -> AuthToken {
@@ -185,7 +185,7 @@ struct AuthStatusCommand: AsyncParsableCommand {
 
     func run() async throws {
         if let token = try? AuthToken.saved() {
-            print("Logged in.\n\(token)")
+            print("Logged in.")
         } else {
             print("Logged out")
         }
