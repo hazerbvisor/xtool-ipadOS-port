@@ -25,7 +25,7 @@ struct AuthOperation {
     var quiet = false
 
     func run() async throws {
-        if let token = try? AuthToken.saved(), !logoutFromExisting {
+        if (try? AuthToken.saved()) != nil, !logoutFromExisting {
             if !quiet {
                 print("Logged in.")
             }
@@ -184,7 +184,7 @@ struct AuthStatusCommand: AsyncParsableCommand {
     )
 
     func run() async throws {
-        if let token = try? AuthToken.saved() {
+        if (try? AuthToken.saved()) != nil {
             print("Logged in.")
         } else {
             print("Logged out")
